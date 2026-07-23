@@ -1,0 +1,13 @@
+# Never commit key material or a local store
+*.age
+identity.txt
+recipients.txt
+.secrets/
+
+# Editor / OS noise
+*~
+*.swp
+.DS_Store
+
+# Test scratch
+/tmp/

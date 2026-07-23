@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck (POSIX sh)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q shellcheck
+          shellcheck --shell=sh secret.sh
+          shellcheck --shell=sh tests/test-secret.sh
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [dash, bash, zsh]
+        backend: [age, rage]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shells
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q dash zsh
+
+      - name: Install age
+        if: matrix.backend == 'age'
+        run: |
+          curl -fsSL "https://dl.filippo.io/age/latest?for=linux/amd64" \
+            | sudo tar -xz -C /usr/local/bin --strip-components=1 age/age age/age-keygen
+
+      - name: Install rage
+        if: matrix.backend == 'rage'
+        env:
+          RAGE_VERSION: v0.11.1
+        run: |
+          curl -fsSL "https://github.com/str4d/rage/releases/download/${RAGE_VERSION}/rage-${RAGE_VERSION}-x86_64-linux.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin --strip-components=1 rage/rage rage/rage-keygen
+
+      - name: Run test suite
+        env:
+          SECRETS_AGE: ${{ matrix.backend }}
+        run: ${{ matrix.shell }} tests/test-secret.sh
