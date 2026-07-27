@@ -64,6 +64,7 @@ secret enc  [-f] NAME       encrypt stdin -> NAME.age  (-f overwrites)
 secret dec  NAME            decrypt to stdout, verbatim
 secret ls                   list stored names
 secret rm   NAME            delete a secret
+secret rename [-f] OLD NEW  rename a secret
 secret recipients           show who can decrypt
 secret rekey                re-encrypt everything to current recipients
 secret completions SHELL    emit completions (bash | zsh | fish)
@@ -120,7 +121,7 @@ sh tests/test-secret.sh                       # autodetected backend
 SECRETS_AGE=rage dash tests/test-secret.sh    # pin backend and shell
 ```
 
-The suite (63 checks) covers roundtrips, binary payloads, tamper rejection,
+The suite (79 checks) covers roundtrips, binary payloads, tamper rejection,
 name-injection attempts, clobber protection, write-only operation, atomic
 rekey, armor mode, completions, and variable-leak detection. CI runs it
 across {dash, bash, zsh} × {age, rage}.

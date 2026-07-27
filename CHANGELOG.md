@@ -5,8 +5,8 @@
 Initial release.
 
 - POSIX `sh` secret store sourced as a single file; `secret` dispatcher
-  with `init`, `enc`, `dec`, `ls`, `rm`, `recipients`, `rekey`,
-  `completions`, `help` subcommands.
+  with `init`, `enc`, `dec`, `ls`, `rm`, `rename`, `recipients`,
+  `rekey`, `completions`, `help` subcommands.
 - Interchangeable age / rage backends, auto-detected, pinnable via
   `SECRETS_AGE`.
 - Asymmetric encryption against a recipients file; write-only operation
@@ -16,4 +16,4 @@ Initial release.
 - Shell completions for bash, zsh, and fish.
 - Format-agnostic storage: secrets are opaque byte blobs, decrypted
   verbatim with no KEY=value or other content conventions.
-- 63-check test suite run in CI across {dash, bash, zsh} x {age, rage}.
+- 79-check test suite run in CI across {dash, bash, zsh} x {age, rage}.
