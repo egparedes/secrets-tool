@@ -120,6 +120,21 @@ check "rm removed it" "0" "$(secret ls | grep -cx dup)"
 secret help >/dev/null; check "help rc" "0" "$?"
 secret bogus >/dev/null 2>&1; check "unknown subcommand rc" "2" "$?"
 
+echo "== rename =="
+printf 'moved\n' | secret enc oldname
+secret rename oldname newname; check "rename rc" "0" "$?"
+check "old name gone" "0" "$(secret ls | grep -cx oldname)"
+check "new name decrypts" "moved" "$(secret dec newname)"
+secret rename missing x >/dev/null 2>&1; check "rename missing rc" "1" "$?"
+printf 'other\n' | secret enc taken
+secret rename newname taken >/dev/null 2>&1; check "rename clobber refused" "1" "$?"
+check "clobber target intact" "other" "$(secret dec taken)"
+secret rename -f newname taken; check "rename -f rc" "0" "$?"
+check "rename -f overwrote" "moved" "$(secret dec taken)"
+secret rename taken taken >/dev/null 2>&1; check "self-rename refused" "1" "$?"
+secret rename '../x' ok2 >/dev/null 2>&1; check "bad OLD rejected" "2" "$?"
+secret rename taken 'a/b' >/dev/null 2>&1; check "bad NEW rejected" "2" "$?"
+
 echo "== completions emit and parse =="
 secret completions bash > "$T/c.bash"; check "bash emit rc" "0" "$?"
 bash -n "$T/c.bash"; check "bash completion parses" "0" "$?"
@@ -131,7 +146,7 @@ secret completions fish > "$T/c.fish"; check "fish emit rc" "0" "$?"
 secret completions powershell >/dev/null 2>&1; check "unknown shell rc" "2" "$?"
 
 echo "== no variable leakage into sourcing shell (subshell bodies) =="
-for var in agebin keygen out tmp in name f n stage st pub force; do
+for var in agebin keygen out tmp in name f n stage st pub force src dst; do
     eval "val=\${$var-__UNSET__}"
     [ "$val" = "__UNSET__" ] && ok "no leak: \$$var" || bad "leaked: \$$var=[$val]"
 done

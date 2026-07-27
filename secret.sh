@@ -10,6 +10,7 @@
 #   secret dec  NAME            decrypt -> stdout, plaintext verbatim
 #   secret ls                   list stored names
 #   secret rm   NAME            delete a secret
+#   secret rename [-f] OLD NEW  rename a secret
 #   secret recipients           show who can decrypt
 #   secret rekey                re-encrypt everything to current recipients
 #   secret completions SHELL    emit completion script (bash | zsh | fish)
@@ -207,6 +208,30 @@ _secret_rm() (
     rm -i -- "$f"
 )
 
+_secret_rename() (
+    force=0
+    if [ "${1-}" = "-f" ]; then force=1; shift; fi
+
+    _secret_name "${1-}" || exit $?
+    _secret_name "${2-}" || exit $?
+
+    src="$SECRETS_DIR/$1.age"
+    dst="$SECRETS_DIR/$2.age"
+    if [ ! -e "$src" ]; then
+        printf 'secret: no such secret: %s\n' "$1" >&2
+        exit 1
+    fi
+    if [ "$1" = "$2" ]; then
+        printf 'secret: %s is already named %s\n' "$1" "$2" >&2
+        exit 1
+    fi
+    if [ -e "$dst" ] && [ "$force" -eq 0 ]; then
+        printf 'secret: %s already exists (use -f to overwrite)\n' "$dst" >&2
+        exit 1
+    fi
+    mv -f -- "$src" "$dst"
+)
+
 _secret_recipients() (
     if [ ! -s "$SECRETS_RECIPIENTS" ]; then
         printf 'secret: no recipients at %s\n' "$SECRETS_RECIPIENTS" >&2
@@ -319,6 +344,7 @@ usage: secret <subcommand> [args]
   dec  NAME            decrypt to stdout, verbatim
   ls                   list stored names
   rm   NAME            delete a secret
+  rename [-f] OLD NEW  rename a secret (-f overwrites)
   recipients           show who can decrypt
   rekey                re-encrypt everything to current recipients
   completions SHELL    emit completions (bash | zsh | fish)
@@ -336,6 +362,7 @@ secret() {
         dec)         shift; _secret_dec "$@" ;;
         ls)          shift; _secret_ls "$@" ;;
         rm)          shift; _secret_rm "$@" ;;
+        rename)      shift; _secret_rename "$@" ;;
         recipients)  shift; _secret_recipients "$@" ;;
         rekey)       shift; _secret_rekey "$@" ;;
         completions) shift; _secret_completions "$@" ;;
