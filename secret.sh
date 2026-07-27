@@ -291,12 +291,12 @@ _secret_completions() (
 _secret_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "init enc dec ls rm recipients rekey completions help" -- "$cur"))
+        COMPREPLY=($(compgen -W "init enc dec ls rm rename recipients rekey completions help" -- "$cur"))
         return
     fi
     case "${COMP_WORDS[1]}" in
         dec|rm)   COMPREPLY=($(compgen -W "$(secret ls 2>/dev/null)" -- "$cur")) ;;
-        enc)          COMPREPLY=($(compgen -W "-f $(secret ls 2>/dev/null)" -- "$cur")) ;;
+        enc|rename)   COMPREPLY=($(compgen -W "-f $(secret ls 2>/dev/null)" -- "$cur")) ;;
         completions)  COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur")) ;;
     esac
 }
@@ -306,14 +306,14 @@ EOF
     zsh) cat <<'EOF'
 _secret() {
     local -a subcmds
-    subcmds=(init enc dec ls rm recipients rekey completions help)
+    subcmds=(init enc dec ls rm rename recipients rekey completions help)
     if (( CURRENT == 2 )); then
         _describe 'subcommand' subcmds
         return
     fi
     case "$words[2]" in
         dec|rm)   compadd -- ${(f)"$(secret ls 2>/dev/null)"} ;;
-        enc)          compadd -- -f ${(f)"$(secret ls 2>/dev/null)"} ;;
+        enc|rename)   compadd -- -f ${(f)"$(secret ls 2>/dev/null)"} ;;
         completions)  compadd bash zsh fish ;;
     esac
 }
@@ -322,9 +322,9 @@ EOF
         ;;
     fish) cat <<'EOF'
 complete -c secret -f
-complete -c secret -n '__fish_use_subcommand' -a 'init enc dec ls rm recipients rekey completions help'
-complete -c secret -n '__fish_seen_subcommand_from dec rm enc' -a '(secret ls 2>/dev/null)'
-complete -c secret -n '__fish_seen_subcommand_from enc' -s f -d 'overwrite existing secret'
+complete -c secret -n '__fish_use_subcommand' -a 'init enc dec ls rm rename recipients rekey completions help'
+complete -c secret -n '__fish_seen_subcommand_from dec rm enc rename' -a '(secret ls 2>/dev/null)'
+complete -c secret -n '__fish_seen_subcommand_from enc rename' -s f -d 'overwrite existing secret'
 complete -c secret -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'
 EOF
         ;;

@@ -144,6 +144,9 @@ if command -v zsh >/dev/null 2>&1; then
 fi
 secret completions fish > "$T/c.fish"; check "fish emit rc" "0" "$?"
 secret completions powershell >/dev/null 2>&1; check "unknown shell rc" "2" "$?"
+grep -qw rename "$T/c.bash"; check "bash completes rename" "0" "$?"
+grep -qw rename "$T/c.zsh";  check "zsh completes rename" "0" "$?"
+grep -qw rename "$T/c.fish"; check "fish completes rename" "0" "$?"
 
 echo "== no variable leakage into sourcing shell (subshell bodies) =="
 for var in agebin keygen out tmp in name f n stage st pub force src dst; do
