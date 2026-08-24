@@ -211,6 +211,17 @@ check "cli: bash completion registers secrets" "0" "$?"
 grep -qw 'secret' "$T/cli.bash"
 check "cli: no stale 'secret' in bash completion" "1" "$?"
 
+# a staged `make install` tree resolves via the prefix-relative candidate
+( cd "$(dirname "$0")/.." && make install DESTDIR="$T/dest" PREFIX=/usr/local ) >/dev/null 2>&1
+check "make install rc" "0" "$?"
+check "installed bin mode" "755" "$(stat -c %a "$T/dest/usr/local/bin/secrets" 2>/dev/null)"
+check "installed lib mode" "644" \
+    "$(stat -c %a "$T/dest/usr/local/share/secrets/secrets-lib.sh" 2>/dev/null)"
+check "installed cli works" "ghp_abc123" \
+    "$(env SECRETS_LIB= HOME=/nonexistent "$T/dest/usr/local/bin/secrets" dec github)"
+( cd "$(dirname "$0")/.." && make uninstall DESTDIR="$T/dest" PREFIX=/usr/local ) >/dev/null 2>&1
+check "uninstall removes both" "0" "$(find "$T/dest" -type f 2>/dev/null | wc -l)"
+
 echo "== no variable leakage into sourcing shell (subshell bodies) =="
 for var in agebin keygen out tmp in name f n stage st pub force src dst; do
     eval "val=\${$var-__UNSET__}"
