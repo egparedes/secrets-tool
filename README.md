@@ -47,14 +47,15 @@ Or fetch the two files directly, no clone needed:
 
 ```sh
 mkdir -p ~/.local/bin ~/.local/share/secrets
-base=https://raw.githubusercontent.com/OWNER/secret-sh/main
+base=https://raw.githubusercontent.com/egparedes/secrets-tool/main
 curl -fsSL "$base/bin/secrets"          -o ~/.local/bin/secrets
 curl -fsSL "$base/lib/secrets-lib.sh"   -o ~/.local/share/secrets/secrets-lib.sh
 chmod +x ~/.local/bin/secrets
 ```
 
-(Replace `OWNER` with the GitHub owner after pushing; or pin a tag/commit
-instead of `main` for reproducible installs.)
+Pin a tag or commit instead of `main` for reproducible installs — these
+two files are fetched straight into your `PATH`, so tracking a moving
+branch means every re-run can bring different code.
 
 Make sure `~/.local/bin` is on your `PATH`. The CLI finds the library
 relative to its own location, so any prefix works; `SECRETS_LIB` overrides
