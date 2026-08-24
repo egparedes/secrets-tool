@@ -151,6 +151,9 @@ grep -qw rename "$T/c.fish"; check "fish completes rename" "0" "$?"
 
 echo "== cli wrapper =="
 CLI=$(dirname "$0")/../bin/secrets
+# `env VAR= cmd` below is needed only for empty-value overrides -- the bare
+# `VAR= cmd` form trips shellcheck's SC1007 on an empty value. Non-empty
+# overrides (e.g. `SECRETS_LIB=/path cmd`) don't trip it and don't need `env`.
 
 # [2] resolution straight from a git checkout: $dir/../lib/secrets-lib.sh
 check "cli: checkout resolution" "ghp_abc123" "$(env SECRETS_LIB= "$CLI" dec github)"
@@ -175,11 +178,17 @@ check "cli: SECRETS_LIB override" "ghp_abc123" \
     "$(SECRETS_LIB="$T/pfx/share/secrets/secrets-lib.sh" HOME=/nonexistent \
        "$T/lone/bin/secrets" dec github)"
 
-# no library reachable at all
-cli_err=$(env SECRETS_LIB= HOME=/nonexistent "$T/lone/bin/secrets" ls 2>&1 >/dev/null)
-check "cli: missing lib rc" "127" "$?"
-printf '%s' "$cli_err" | grep -q 'SECRETS_LIB'
-check "cli: missing lib names SECRETS_LIB" "0" "$?"
+# no library reachable at all -- but candidates [6] and [7] are absolute
+# machine-wide paths (Task 3's `make install` defaults PREFIX to /usr/local,
+# i.e. candidate [6]), so this library-less state isn't always reachable
+if [ -r /usr/local/share/secrets/secrets-lib.sh ] || [ -r /usr/share/secrets/secrets-lib.sh ]; then
+    echo "  skip cli: missing lib (system-wide library installed)"
+else
+    cli_err=$(env SECRETS_LIB= HOME=/nonexistent "$T/lone/bin/secrets" ls 2>&1 >/dev/null)
+    check "cli: missing lib rc" "127" "$?"
+    printf '%s' "$cli_err" | grep -q 'SECRETS_LIB'
+    check "cli: missing lib names SECRETS_LIB" "0" "$?"
+fi
 
 # exit codes survive the extra process
 env SECRETS_LIB= "$CLI" dec nonexistent >/dev/null 2>&1
