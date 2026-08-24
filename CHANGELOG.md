@@ -18,4 +18,4 @@ Initial release.
 - Shell completions for bash, zsh, and fish.
 - Format-agnostic storage: secrets are opaque byte blobs, decrypted
   verbatim with no KEY=value or other content conventions.
-- 104-check test suite run in CI across {dash, bash, zsh} x {age, rage}.
+- 113-check test suite run in CI across {dash, bash, zsh} x {age, rage}.

@@ -48,7 +48,13 @@
 # Tested with age v1.3.1 and rage v0.11.1 under dash, bash, and zsh.
 # ─────────────────────────────────────────────────────────────────────────────
 
-: "${SECRETS_DIR:=$HOME/.secrets}"
+# A bare $HOME here would abort sourcing with a raw "HOME: parameter not set"
+# under the CLI's set -u, leaving secrets() undefined. Leave SECRETS_DIR empty
+# instead and let the dispatcher report it; sourcing must always succeed.
+if [ -z "${SECRETS_DIR:-}" ] && [ -n "${HOME:-}" ]; then
+    SECRETS_DIR="$HOME/.secrets"
+fi
+: "${SECRETS_DIR:=}"
 : "${SECRETS_IDENTITY:=$SECRETS_DIR/identity.txt}"
 : "${SECRETS_RECIPIENTS:=$SECRETS_DIR/recipients.txt}"
 : "${SECRETS_ARMOR:=0}"
@@ -356,6 +362,10 @@ EOF
 # --- dispatcher --------------------------------------------------------------
 
 secrets() {
+    if [ -z "${SECRETS_DIR:-}" ]; then
+        printf 'secrets: neither SECRETS_DIR nor HOME is set; export SECRETS_DIR to pick a store\n' >&2
+        return 2
+    fi
     case "${1-help}" in
         init)        shift; _secrets_init "$@" ;;
         enc)         shift; _secrets_enc "$@" ;;
