@@ -155,14 +155,22 @@ CLI=$(dirname "$0")/../bin/secrets
 # `VAR= cmd` form trips shellcheck's SC1007 on an empty value. Non-empty
 # overrides (e.g. `SECRETS_LIB=/path cmd`) don't trip it and don't need `env`.
 
-# [2] resolution straight from a git checkout: $dir/../lib/secrets-lib.sh
+# [3] resolution straight from a git checkout: $dir/../lib/secrets-lib.sh
 check "cli: checkout resolution" "ghp_abc123" "$(env SECRETS_LIB= "$CLI" dec github)"
 
-# [3] resolution from an installed prefix: $dir/../share/secrets/secrets-lib.sh
+# [2] resolution from an installed prefix: $dir/../share/secrets/secrets-lib.sh
 mkdir -p "$T/pfx/bin" "$T/pfx/share/secrets"
 cp "$CLI" "$T/pfx/bin/secrets"
 cp "$SECRETS_LIB" "$T/pfx/share/secrets/secrets-lib.sh"
 check "cli: prefix/share resolution" "ghp_abc123" \
+    "$(env SECRETS_LIB= HOME=/nonexistent "$T/pfx/bin/secrets" dec github)"
+
+# [2] beats [3]: a decoy at $dir/../lib must not shadow the installed
+# $dir/../share library -- regression coverage for the fix that swapped
+# their resolution order (see the whole-branch review, 2026-08-24).
+mkdir -p "$T/pfx/lib"
+printf '%s\n' 'secrets() { printf "DECOY-SHADOWED-LIBRARY"; }' > "$T/pfx/lib/secrets-lib.sh"
+check "cli: share/ not shadowed by lib/ decoy" "ghp_abc123" \
     "$(env SECRETS_LIB= HOME=/nonexistent "$T/pfx/bin/secrets" dec github)"
 
 # [4] resolution with both files in one directory
@@ -177,6 +185,12 @@ cp "$CLI" "$T/lone/bin/secrets"
 check "cli: SECRETS_LIB override" "ghp_abc123" \
     "$(SECRETS_LIB="$T/pfx/share/secrets/secrets-lib.sh" HOME=/nonexistent \
        "$T/lone/bin/secrets" dec github)"
+
+# a set-but-unreadable SECRETS_LIB is a hard error, not a silent fall-through
+lib_err=$(env SECRETS_LIB=/nonexistent/lib.sh "$CLI" ls 2>&1 >/dev/null)
+check "cli: unreadable SECRETS_LIB rc" "127" "$?"
+printf '%s' "$lib_err" | grep -q 'SECRETS_LIB'
+check "cli: unreadable SECRETS_LIB names it" "0" "$?"
 
 # no library reachable at all -- but candidates [6] and [7] are absolute
 # machine-wide paths (Task 3's `make install` defaults PREFIX to /usr/local,
@@ -200,6 +214,14 @@ check "cli: unknown subcommand rc" "2" "$?"
 env SECRETS_LIB= "$CLI" >/dev/null 2>&1
 check "cli: no args is help" "0" "$?"
 
+# exit code 3 (missing identity) also crosses the process boundary; move
+# the identity aside and always restore it right after, so a failing
+# check here cannot leave the store without its identity file.
+mv "$SECRETS_IDENTITY" "$T/id.cli.bak"
+env SECRETS_LIB= "$CLI" dec github >/dev/null 2>&1
+check "cli: missing identity rc" "3" "$?"
+mv "$T/id.cli.bak" "$SECRETS_IDENTITY"
+
 # stdin flows through the wrapper unchanged
 printf 'via-cli\n' | env SECRETS_LIB= "$CLI" enc fromcli
 check "cli: stdin pipe roundtrip" "via-cli" "$(env SECRETS_LIB= "$CLI" dec fromcli)"
@@ -208,19 +230,26 @@ check "cli: stdin pipe roundtrip" "via-cli" "$(env SECRETS_LIB= "$CLI" dec fromc
 env SECRETS_LIB= "$CLI" completions bash > "$T/cli.bash"
 grep -q 'complete -F _secrets_complete secrets' "$T/cli.bash"
 check "cli: bash completion registers secrets" "0" "$?"
+# bash-only: the fish completion legitimately contains the prose word
+# "secret" (`-d 'overwrite existing secret'`), so this stale-name check
+# would false-positive there.
 grep -qw 'secret' "$T/cli.bash"
 check "cli: no stale 'secret' in bash completion" "1" "$?"
 
 # a staged `make install` tree resolves via the prefix-relative candidate
-( cd "$(dirname "$0")/.." && make install DESTDIR="$T/dest" PREFIX=/usr/local ) >/dev/null 2>&1
-check "make install rc" "0" "$?"
-check "installed bin mode" "755" "$(stat -c %a "$T/dest/usr/local/bin/secrets" 2>/dev/null)"
-check "installed lib mode" "644" \
-    "$(stat -c %a "$T/dest/usr/local/share/secrets/secrets-lib.sh" 2>/dev/null)"
-check "installed cli works" "ghp_abc123" \
-    "$(env SECRETS_LIB= HOME=/nonexistent "$T/dest/usr/local/bin/secrets" dec github)"
-( cd "$(dirname "$0")/.." && make uninstall DESTDIR="$T/dest" PREFIX=/usr/local ) >/dev/null 2>&1
-check "uninstall removes both" "0" "$(find "$T/dest" -type f 2>/dev/null | wc -l)"
+if command -v make >/dev/null 2>&1; then
+    make -C "$(dirname "$0")/.." install DESTDIR="$T/dest" PREFIX=/usr/local >/dev/null 2>&1
+    check "make install rc" "0" "$?"
+    check "installed bin mode" "755" "$(stat -c %a "$T/dest/usr/local/bin/secrets" 2>/dev/null)"
+    check "installed lib mode" "644" \
+        "$(stat -c %a "$T/dest/usr/local/share/secrets/secrets-lib.sh" 2>/dev/null)"
+    check "installed cli works" "ghp_abc123" \
+        "$(env SECRETS_LIB= HOME=/nonexistent "$T/dest/usr/local/bin/secrets" dec github)"
+    make -C "$(dirname "$0")/.." uninstall DESTDIR="$T/dest" PREFIX=/usr/local >/dev/null 2>&1
+    check "uninstall removes both" "0" "$(find "$T/dest" -type f 2>/dev/null | wc -l)"
+else
+    echo "  skip make-based checks (make not found)"
+fi
 
 echo "== no variable leakage into sourcing shell (subshell bodies) =="
 for var in agebin keygen out tmp in name f n stage st pub force src dst; do

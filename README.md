@@ -7,7 +7,7 @@ or its Rust implementation [rage](https://github.com/str4d/rage). A POSIX
 ```console
 $ secrets init
 secrets: backend    age
-secrets: identity   ~/.secrets/identity.txt
+secrets: identity   /home/you/.secrets/identity.txt
 secrets: public key age1levmga375nt6rjs69al874uh4xjpmdng87up5g7v9u2vhu3hmddqtt9d4r
 secrets: back up the identity -- without it every .age file is unrecoverable
 $ printf 'ghp_abc123\n' | secrets enc github
@@ -39,8 +39,8 @@ managers (`apt install age`, `brew install age`, `pacman -S age`, ...).
 From a clone:
 
 ```sh
-make install                      # -> /usr/local, may need sudo
-make install PREFIX=~/.local      # -> ~/.local/bin and ~/.local/share
+make install                            # -> /usr/local, may need sudo
+make install PREFIX="$HOME/.local"      # -> ~/.local/bin and ~/.local/share
 ```
 
 Or fetch the two files directly, no clone needed:
@@ -52,6 +52,9 @@ curl -fsSL "$base/bin/secrets"          -o ~/.local/bin/secrets
 curl -fsSL "$base/lib/secrets-lib.sh"   -o ~/.local/share/secrets/secrets-lib.sh
 chmod +x ~/.local/bin/secrets
 ```
+
+(Replace `OWNER` with the GitHub owner after pushing; or pin a tag/commit
+instead of `main` for reproducible installs.)
 
 Make sure `~/.local/bin` is on your `PATH`. The CLI finds the library
 relative to its own location, so any prefix works; `SECRETS_LIB` overrides
@@ -102,11 +105,12 @@ extra process:
 #!/bin/sh
 set -eu
 . ~/.local/share/secrets/secrets-lib.sh
-export GITHUB_TOKEN="$(secrets dec github)"
+GITHUB_TOKEN=$(secrets dec github)
+export GITHUB_TOKEN
 ```
 
 Adjust the path above to wherever you installed the library — this
-example matches `PREFIX=~/.local`, but a default `make install` puts it
+example matches `PREFIX="$HOME/.local"`, but a default `make install` puts it
 under `/usr/local/share/secrets/secrets-lib.sh` instead. Helper functions
 use subshell bodies, so sourcing leaks no variables into your shell. This
 also works from your `.bashrc` if you prefer the function over the
@@ -158,13 +162,14 @@ sh tests/test-secrets.sh                       # same thing
 SECRETS_AGE=rage dash tests/test-secrets.sh    # pin backend and shell
 ```
 
-The suite (97 checks on a typical machine — a couple are skipped if a
-system-wide library is already installed, and one if `zsh` isn't present)
-covers roundtrips, binary payloads, tamper rejection, name-injection
-attempts, clobber protection, write-only operation, atomic rekey, armor
-mode, completions, variable-leak detection, CLI library discovery, and
-install staging via `make install`/`make uninstall`. CI runs it across
-{dash, bash, zsh} × {age, rage}.
+The suite (101 checks on a typical machine — a couple are skipped if a
+system-wide library is already installed, one if `zsh` isn't present, and
+five if `make` isn't present) covers roundtrips, binary payloads, tamper
+rejection, name-injection attempts, clobber protection, write-only
+operation, atomic rekey, armor mode, completions, variable-leak
+detection, CLI library discovery, and install staging via `make
+install`/`make uninstall`. CI runs it across {dash, bash, zsh} × {age,
+rage}.
 
 ## Threat model
 

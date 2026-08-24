@@ -11,6 +11,7 @@ all:
 
 install:
 	mkdir -p '$(BINDIR)' '$(LIBDIR)'
+	chmod 755 '$(BINDIR)' '$(LIBDIR)'
 	cp bin/secrets '$(BINDIR)/secrets'
 	chmod 755 '$(BINDIR)/secrets'
 	cp lib/secrets-lib.sh '$(LIBDIR)/secrets-lib.sh'
