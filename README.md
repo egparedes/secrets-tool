@@ -1,17 +1,19 @@
-# secret.sh
+# secrets
 
 A tiny secret store for the shell, built on [age](https://age-encryption.org)
-or its Rust implementation [rage](https://github.com/str4d/rage). One
-sourceable POSIX `sh` file, no daemon, no config format.
+or its Rust implementation [rage](https://github.com/str4d/rage). A POSIX
+`sh` library plus a small CLI that wraps it, no daemon, no config format.
 
 ```console
-$ secret init
-secret: backend    age
-secret: public key age1levmga375nt6rjs69al874uh4xjpmdng87up5g7v9u2vhu3hmddqtt9d4r
-$ printf 'ghp_abc123\n' | secret enc github
-$ secret dec github
+$ secrets init
+secrets: backend    age
+secrets: identity   /home/you/.secrets/identity.txt
+secrets: public key age1levmga375nt6rjs69al874uh4xjpmdng87up5g7v9u2vhu3hmddqtt9d4r
+secrets: back up the identity -- without it every .age file is unrecoverable
+$ printf 'ghp_abc123\n' | secrets enc github
+$ secrets dec github
 ghp_abc123
-$ export GITHUB_TOKEN="$(secret dec github)"
+$ export GITHUB_TOKEN="$(secrets dec github)"
 ```
 
 ## Why
@@ -26,7 +28,7 @@ $ export GITHUB_TOKEN="$(secret dec github)"
   universal in practice). Tested under dash, bash, and zsh, against both
   age v1.3.1 and rage v0.11.1. One store, either binary.
 - **Multi-machine.** Append another machine's public key to
-  `recipients.txt`, run `secret rekey`, sync the directory (ciphertext
+  `recipients.txt`, run `secrets rekey`, sync the directory (ciphertext
   only — safe for git/rsync).
 
 ## Install
@@ -34,53 +36,85 @@ $ export GITHUB_TOKEN="$(secret dec github)"
 Requires `age` (or `rage`) — single static binaries, also in most package
 managers (`apt install age`, `brew install age`, `pacman -S age`, ...).
 
-No clone needed — fetch the one file that matters and source it:
+From a clone:
 
 ```sh
-mkdir -p ~/.local/share/secret-sh
-curl -fsSL https://raw.githubusercontent.com/OWNER/secret-sh/main/secret.sh \
-    -o ~/.local/share/secret-sh/secret.sh
+make install                            # -> /usr/local, may need sudo
+make install PREFIX="$HOME/.local"      # -> ~/.local/bin and ~/.local/share
+```
 
-# bash/zsh/dash — add to your shell rc:
-echo '. "$HOME/.local/share/secret-sh/secret.sh"' >> ~/.bashrc
+Or fetch the two files directly, no clone needed:
+
+```sh
+mkdir -p ~/.local/bin ~/.local/share/secrets
+base=https://raw.githubusercontent.com/OWNER/secret-sh/main
+curl -fsSL "$base/bin/secrets"          -o ~/.local/bin/secrets
+curl -fsSL "$base/lib/secrets-lib.sh"   -o ~/.local/share/secrets/secrets-lib.sh
+chmod +x ~/.local/bin/secrets
 ```
 
 (Replace `OWNER` with the GitHub owner after pushing; or pin a tag/commit
 instead of `main` for reproducible installs.)
 
+Make sure `~/.local/bin` is on your `PATH`. The CLI finds the library
+relative to its own location, so any prefix works; `SECRETS_LIB` overrides
+the search if you put the library somewhere unusual — or if you reach
+`secrets` through a symlink, which is not resolved.
+
 Then, optionally, tab completion:
 
 ```sh
-# bash (.bashrc):            eval "$(secret completions bash)"
-# zsh  (.zshrc, after compinit):  eval "$(secret completions zsh)"
-# fish:  secret completions fish > ~/.config/fish/completions/secret.fish
+# bash (.bashrc):                 eval "$(secrets completions bash)"
+# zsh  (.zshrc, after compinit):  eval "$(secrets completions zsh)"
+# fish:  secrets completions fish > ~/.config/fish/completions/secrets.fish
 ```
 
 ## Usage
 
 ```
-secret init                 create the store, generate an identity
-secret enc  [-f] NAME       encrypt stdin -> NAME.age  (-f overwrites)
-secret dec  NAME            decrypt to stdout, verbatim
-secret ls                   list stored names
-secret rm   NAME            delete a secret
-secret rename [-f] OLD NEW  rename a secret
-secret recipients           show who can decrypt
-secret rekey                re-encrypt everything to current recipients
-secret completions SHELL    emit completions (bash | zsh | fish)
+secrets init                 create the store, generate an identity
+secrets enc  [-f] NAME       encrypt stdin -> NAME.age  (-f overwrites)
+secrets dec  NAME            decrypt to stdout, verbatim
+secrets ls                   list stored names
+secrets rm   NAME            delete a secret
+secrets rename [-f] OLD NEW  rename a secret
+secrets recipients           show who can decrypt
+secrets rekey                re-encrypt everything to current recipients
+secrets completions SHELL    emit completions (bash | zsh | fish)
 ```
 
-Secrets are opaque byte blobs: `secret dec` returns exactly what you piped
-into `secret enc` — single values, multi-line files, or binary data — with
+Secrets are opaque byte blobs: `secrets dec` returns exactly what you piped
+into `secrets enc` — single values, multi-line files, or binary data — with
 no parsing or format assumptions. Compose with standard tools instead, e.g.
 the `pass`(1) convention of "first line is the password, the rest is
 metadata" is just:
 
 ```sh
-printf 'hunter2\nuser: enrique\nurl: example.com\n' | secret enc example
-secret dec example | head -n 1        # -> hunter2
-secret dec example | tail -n +2       # -> the metadata
+printf 'hunter2\nuser: enrique\nurl: example.com\n' | secrets enc example
+secrets dec example | head -n 1        # -> hunter2
+secrets dec example | tail -n +2       # -> the metadata
 ```
+
+### Use it as a library
+
+`secrets` is a thin wrapper around a sourceable POSIX `sh` file. Scripts
+that want the dispatcher in-process can source it directly and skip the
+extra process:
+
+```sh
+#!/bin/sh
+set -eu
+. ~/.local/share/secrets/secrets-lib.sh
+GITHUB_TOKEN=$(secrets dec github)
+export GITHUB_TOKEN
+```
+
+Adjust the path above to wherever you installed the library — this
+example matches `PREFIX="$HOME/.local"`, but a default `make install` puts it
+under `/usr/local/share/secrets/secrets-lib.sh` instead. Helper functions
+use subshell bodies, so sourcing leaks no variables into your shell. This
+also works from your `.bashrc` if you prefer the function over the
+command.
 
 ### Configuration
 
@@ -91,6 +125,12 @@ secret dec example | tail -n +2       # -> the metadata
 | `SECRETS_IDENTITY`   | `$SECRETS_DIR/identity.txt`      | private key (decrypt)            |
 | `SECRETS_RECIPIENTS` | `$SECRETS_DIR/recipients.txt`    | public keys (encrypt)            |
 | `SECRETS_ARMOR`      | `0`                              | `1` = ASCII-armored `.age` files |
+| `SECRETS_LIB`        | search path (see Install)        | library location, CLI only       |
+
+Because `secrets` is a separate process, these variables must be
+**exported** to take effect. An unexported `SECRETS_DIR=...` is silently
+ignored and the default store is used instead. Sourcing the library
+directly does not have this constraint.
 
 ### Using existing SSH keys
 
@@ -104,33 +144,38 @@ cp ~/.ssh/id_ed25519.pub "$SECRETS_DIR/recipients.txt"
 ### Adding a second machine
 
 ```sh
-machine-b$ secret init                      # prints its public key
+machine-b$ secrets init                      # prints its public key
 machine-a$ echo 'age1...' >> ~/.secrets/recipients.txt
-machine-a$ secret rekey                     # re-encrypts to both keys
+machine-a$ secrets rekey                     # re-encrypts to both keys
 machine-a$ rsync -a ~/.secrets/ b:.secrets/ # ciphertext only
 ```
 
-Removing a machine is the reverse: delete its line, `secret rekey`. Note
+Removing a machine is the reverse: delete its line, `secrets rekey`. Note
 rekeying does not retroactively protect secrets a removed key already saw —
 rotate those values.
 
 ## Testing
 
 ```sh
-sh tests/test-secret.sh                       # autodetected backend
-SECRETS_AGE=rage dash tests/test-secret.sh    # pin backend and shell
+make test                                      # autodetected backend
+sh tests/test-secrets.sh                       # same thing
+SECRETS_AGE=rage dash tests/test-secrets.sh    # pin backend and shell
 ```
 
-The suite (79 checks) covers roundtrips, binary payloads, tamper rejection,
-name-injection attempts, clobber protection, write-only operation, atomic
-rekey, armor mode, completions, and variable-leak detection. CI runs it
-across {dash, bash, zsh} × {age, rage}.
+The suite (104 checks on a typical machine — a couple are skipped if a
+system-wide library is already installed, one if `zsh` isn't present, and
+five if `make` isn't present) covers roundtrips, binary payloads, tamper
+rejection, name-injection attempts, clobber protection, write-only
+operation, atomic rekey, armor mode, completions, variable-leak
+detection, CLI library discovery, and install staging via `make
+install`/`make uninstall`. CI runs it across {dash, bash, zsh} × {age,
+rage}.
 
 ## Threat model
 
 Protects secrets **at rest** from anyone who can read the files but not the
 identity. It does not protect against an attacker with your running session
-(who can call `secret dec` like you can), and the store leaks metadata:
+(who can call `secrets dec` like you can), and the store leaks metadata:
 secret *names* and file sizes are plaintext. Back up the identity file
 offline — without it the store is unrecoverable.
 

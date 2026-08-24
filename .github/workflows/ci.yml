@@ -17,8 +17,9 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q shellcheck
-          shellcheck --shell=sh secret.sh
-          shellcheck --shell=sh tests/test-secret.sh
+          shellcheck --shell=sh lib/secrets-lib.sh
+          shellcheck --shell=sh tests/test-secrets.sh
+          shellcheck bin/secrets
 
   test:
     runs-on: ubuntu-latest
@@ -52,4 +53,4 @@ jobs:
       - name: Run test suite
         env:
           SECRETS_AGE: ${{ matrix.backend }}
-        run: ${{ matrix.shell }} tests/test-secret.sh
+        run: ${{ matrix.shell }} tests/test-secrets.sh
