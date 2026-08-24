@@ -247,6 +247,22 @@ if command -v make >/dev/null 2>&1; then
         "$(env SECRETS_LIB= HOME=/nonexistent "$T/dest/usr/local/bin/secrets" dec github)"
     make -C "$(dirname "$0")/.." uninstall DESTDIR="$T/dest" PREFIX=/usr/local >/dev/null 2>&1
     check "uninstall removes both" "0" "$(find "$T/dest" -type f 2>/dev/null | wc -l)"
+
+    # install must not hand the caller's umask to the directories it creates:
+    # under `umask 077` a root install would otherwise be unreadable to every
+    # other user. Covers intermediate components, not just the leaf.
+    ( umask 077
+      make -C "$(dirname "$0")/.." install DESTDIR="$T/um" PREFIX=/opt/x ) >/dev/null 2>&1
+    check "install dir mode under umask 077" "755" \
+        "$(stat -c %a "$T/um/opt/x/share/secrets" 2>/dev/null)"
+    check "intermediate dir mode under umask 077" "755" \
+        "$(stat -c %a "$T/um/opt/x/share" 2>/dev/null)"
+
+    # and it must leave the mode of a directory it did not create alone
+    mkdir -p "$T/pre/usr/local/bin" && chmod 2775 "$T/pre/usr/local/bin"
+    make -C "$(dirname "$0")/.." install DESTDIR="$T/pre" PREFIX=/usr/local >/dev/null 2>&1
+    check "pre-existing dir mode preserved" "2775" \
+        "$(stat -c %a "$T/pre/usr/local/bin" 2>/dev/null)"
 else
     echo "  skip make-based checks (make not found)"
 fi

@@ -162,7 +162,7 @@ sh tests/test-secrets.sh                       # same thing
 SECRETS_AGE=rage dash tests/test-secrets.sh    # pin backend and shell
 ```
 
-The suite (101 checks on a typical machine — a couple are skipped if a
+The suite (104 checks on a typical machine — a couple are skipped if a
 system-wide library is already installed, one if `zsh` isn't present, and
 five if `make` isn't present) covers roundtrips, binary payloads, tamper
 rejection, name-injection attempts, clobber protection, write-only

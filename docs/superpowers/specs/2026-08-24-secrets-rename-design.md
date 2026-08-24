@@ -154,6 +154,15 @@ Targets `install`, `uninstall`, and `test` (which runs
 `$(PREFIX)/share/secrets/secrets-lib.sh` mode 644. Copies; never
 symlinks.
 
+Directories are created under `umask 022` rather than chmod'ed afterwards.
+The distinction matters twice: `mkdir -p` under the caller's umask would
+leave a `umask 077` root install unreadable to every other user (and would
+miss intermediate components entirely), while an explicit `chmod` would
+need ownership it may not have, and would silently rewrite the mode of a
+prefix directory that already existed -- dropping setgid on layouts like
+Debian's historical `/usr/local/bin`. Setting the umask affects only the
+directories `make install` actually creates.
+
 ## Testing
 
 One suite, `tests/test-secrets.sh`. The existing `SECRET_SH` override
