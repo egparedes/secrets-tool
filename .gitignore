@@ -11,3 +11,7 @@ recipients.txt
 
 # Test scratch
 /tmp/
+
+# Superpowers skill workspace
+.superpowers/
+docs/superpowers/
