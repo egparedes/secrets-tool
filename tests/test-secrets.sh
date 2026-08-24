@@ -1,6 +1,6 @@
 #!/bin/sh
 # Test suite for secrets-lib.sh. Parameterized:
-# shellcheck disable=SC2015,SC2016,SC2154,SC1007  # ok/bad never fail; literal $(id) intentional; val assigned via eval; VAR= prefix is an intentional empty override, not a typo
+# shellcheck disable=SC2015,SC2016,SC2154  # ok/bad never fail; literal $(id) intentional; val assigned via eval
 #   TEST_SHELL   sh interpreter to run the assertions under (default: sh)
 #   SECRETS_AGE  backend to pin (default: autodetect)
 # The suite itself is POSIX sh and re-execs nothing; the caller picks the shell.
@@ -153,20 +153,20 @@ echo "== cli wrapper =="
 CLI=$(dirname "$0")/../bin/secrets
 
 # [2] resolution straight from a git checkout: $dir/../lib/secrets-lib.sh
-check "cli: checkout resolution" "ghp_abc123" "$(SECRETS_LIB= "$CLI" dec github)"
+check "cli: checkout resolution" "ghp_abc123" "$(env SECRETS_LIB= "$CLI" dec github)"
 
 # [3] resolution from an installed prefix: $dir/../share/secrets/secrets-lib.sh
 mkdir -p "$T/pfx/bin" "$T/pfx/share/secrets"
 cp "$CLI" "$T/pfx/bin/secrets"
 cp "$SECRETS_LIB" "$T/pfx/share/secrets/secrets-lib.sh"
 check "cli: prefix/share resolution" "ghp_abc123" \
-    "$(SECRETS_LIB= HOME=/nonexistent "$T/pfx/bin/secrets" dec github)"
+    "$(env SECRETS_LIB= HOME=/nonexistent "$T/pfx/bin/secrets" dec github)"
 
 # [4] resolution with both files in one directory
 mkdir -p "$T/same"
 cp "$CLI" "$SECRETS_LIB" "$T/same/"
 check "cli: same-dir resolution" "ghp_abc123" \
-    "$(SECRETS_LIB= HOME=/nonexistent "$T/same/secrets" dec github)"
+    "$(env SECRETS_LIB= HOME=/nonexistent "$T/same/secrets" dec github)"
 
 # [1] SECRETS_LIB overrides everything, even with no library near the binary
 mkdir -p "$T/lone/bin"
@@ -176,27 +176,27 @@ check "cli: SECRETS_LIB override" "ghp_abc123" \
        "$T/lone/bin/secrets" dec github)"
 
 # no library reachable at all
-cli_err=$(SECRETS_LIB= HOME=/nonexistent "$T/lone/bin/secrets" ls 2>&1 >/dev/null)
+cli_err=$(env SECRETS_LIB= HOME=/nonexistent "$T/lone/bin/secrets" ls 2>&1 >/dev/null)
 check "cli: missing lib rc" "127" "$?"
 printf '%s' "$cli_err" | grep -q 'SECRETS_LIB'
 check "cli: missing lib names SECRETS_LIB" "0" "$?"
 
 # exit codes survive the extra process
-SECRETS_LIB= "$CLI" dec nonexistent >/dev/null 2>&1
+env SECRETS_LIB= "$CLI" dec nonexistent >/dev/null 2>&1
 check "cli: missing secret rc" "1" "$?"
-SECRETS_LIB= "$CLI" dec '../etc/passwd' >/dev/null 2>&1
+env SECRETS_LIB= "$CLI" dec '../etc/passwd' >/dev/null 2>&1
 check "cli: invalid name rc" "2" "$?"
-SECRETS_LIB= "$CLI" bogus >/dev/null 2>&1
+env SECRETS_LIB= "$CLI" bogus >/dev/null 2>&1
 check "cli: unknown subcommand rc" "2" "$?"
-SECRETS_LIB= "$CLI" >/dev/null 2>&1
+env SECRETS_LIB= "$CLI" >/dev/null 2>&1
 check "cli: no args is help" "0" "$?"
 
 # stdin flows through the wrapper unchanged
-printf 'via-cli\n' | SECRETS_LIB= "$CLI" enc fromcli
-check "cli: stdin pipe roundtrip" "via-cli" "$(SECRETS_LIB= "$CLI" dec fromcli)"
+printf 'via-cli\n' | env SECRETS_LIB= "$CLI" enc fromcli
+check "cli: stdin pipe roundtrip" "via-cli" "$(env SECRETS_LIB= "$CLI" dec fromcli)"
 
 # completions emitted by the CLI name the new command
-SECRETS_LIB= "$CLI" completions bash > "$T/cli.bash"
+env SECRETS_LIB= "$CLI" completions bash > "$T/cli.bash"
 grep -q 'complete -F _secrets_complete secrets' "$T/cli.bash"
 check "cli: bash completion registers secrets" "0" "$?"
 grep -qw 'secret' "$T/cli.bash"
