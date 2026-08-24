@@ -169,12 +169,32 @@ One suite, `tests/test-secrets.sh`. The existing `SECRET_SH` override
 becomes `SECRETS_LIB`, the same variable the CLI reads, so suite and CLI
 agree on one knob.
 
-A new `== cli wrapper ==` section covers: resolution from a checkout,
-from a synthesized `$PREFIX/share` tree, and via `SECRETS_LIB`; the 127
-failure with no library present; exit-code propagation through the extra
-process (1 for a missing secret, 2 for an invalid name); stdin piping
-through the CLI; and completions emitting `secrets` rather than
-`secret`.
+A new `== cli wrapper ==` section covers, in order:
+
+- resolution from a checkout, from a synthesized `$PREFIX/share` tree,
+  from a single directory holding both files, and via `SECRETS_LIB`
+- that a real library under `$PREFIX/share/secrets` wins over a decoy
+  planted at `$PREFIX/lib`
+- the 127 failure with no library reachable, guarded on the absence of a
+  system-wide install
+- `SECRETS_LIB` rejected with a branded message when it names a
+  non-existent path, a directory, or a readable file that does not define
+  `secrets()`
+- a branded message and exit 2 when neither `SECRETS_DIR` nor `HOME` is
+  set, rather than a raw parameter-unset error from the library
+- exit-code propagation through the extra process: 1 for a missing
+  secret, 2 for an invalid name, 3 for a missing identity, 127 for a
+  missing library
+- stdin piping through the CLI, and completions emitting `secrets`
+  rather than `secret`
+- a staged `make install`: file and directory modes, resolution through
+  the installed tree, directory modes under a hardened umask, a
+  pre-existing directory's mode left alone, and `uninstall` tolerating a
+  user's own file in the library directory
+
+The harness records the label of every failed check and prints the list
+above the tally, so a rare or intermittent failure is diagnosable from a
+captured run rather than only from a live terminal.
 
 The CLI always runs under `#!/bin/sh` regardless of `TEST_SHELL`, so
 these checks are shell-independent and simply repeat across the matrix.

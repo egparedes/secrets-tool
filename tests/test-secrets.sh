@@ -7,7 +7,9 @@
 
 pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
-bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
+failed=''
+bad()  { fail=$((fail+1)); failed="$failed
+  $1"; printf '  FAIL %s\n' "$1"; }
 check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want [$2] got [$3])"; fi; }
 
 T=$(mktemp -d /tmp/secrets-test.XXXXXX)
@@ -236,6 +238,29 @@ check "cli: bash completion registers secrets" "0" "$?"
 grep -qw 'secret' "$T/cli.bash"
 check "cli: no stale 'secret' in bash completion" "1" "$?"
 
+# SECRETS_LIB must name a readable regular FILE: a directory is readable, and
+# sourcing one yields a raw shell error rather than a branded one
+env SECRETS_LIB="$T" "$CLI" ls >/dev/null 2>&1
+check "cli: SECRETS_LIB as directory rc" "127" "$?"
+cli_err=$(env SECRETS_LIB="$T" "$CLI" ls 2>&1 >/dev/null)
+printf '%s' "$cli_err" | grep -q 'not a readable file'
+check "cli: SECRETS_LIB as directory is branded" "0" "$?"
+
+# a readable file that simply is not the library
+printf 'unrelated_var=1\n' > "$T/notlib.sh"
+env SECRETS_LIB="$T/notlib.sh" "$CLI" ls >/dev/null 2>&1
+check "cli: non-library file rc" "127" "$?"
+cli_err=$(env SECRETS_LIB="$T/notlib.sh" "$CLI" ls 2>&1 >/dev/null)
+printf '%s' "$cli_err" | grep -q 'did not define the secrets() function'
+check "cli: non-library file is branded" "0" "$?"
+
+# neither SECRETS_DIR nor HOME: a branded message and rc 2, not a raw
+# "HOME: parameter not set" from the library's own set -u expansion
+cli_err=$( unset HOME SECRETS_DIR; "$CLI" ls 2>&1 >/dev/null )
+check "cli: no HOME/SECRETS_DIR rc" "2" "$?"
+printf '%s' "$cli_err" | grep -q '^secrets: neither SECRETS_DIR nor HOME'
+check "cli: no HOME/SECRETS_DIR is branded" "0" "$?"
+
 # a staged `make install` tree resolves via the prefix-relative candidate
 if command -v make >/dev/null 2>&1; then
     make -C "$(dirname "$0")/.." install DESTDIR="$T/dest" PREFIX=/usr/local >/dev/null 2>&1
@@ -245,8 +270,19 @@ if command -v make >/dev/null 2>&1; then
         "$(stat -c %a "$T/dest/usr/local/share/secrets/secrets-lib.sh" 2>/dev/null)"
     check "installed cli works" "ghp_abc123" \
         "$(env SECRETS_LIB= HOME=/nonexistent "$T/dest/usr/local/bin/secrets" dec github)"
+    check "two files staged before uninstall" "2" \
+        "$(find "$T/dest" -type f 2>/dev/null | wc -l)"
     make -C "$(dirname "$0")/.." uninstall DESTDIR="$T/dest" PREFIX=/usr/local >/dev/null 2>&1
     check "uninstall removes both" "0" "$(find "$T/dest" -type f 2>/dev/null | wc -l)"
+
+    # the `-` on rmdir is deliberate: uninstall must succeed, and leave the
+    # directory alone, when it still holds a file the user put there
+    make -C "$(dirname "$0")/.." install DESTDIR="$T/keep" PREFIX=/usr/local >/dev/null 2>&1
+    printf 'mine\n' > "$T/keep/usr/local/share/secrets/notes.txt"
+    make -C "$(dirname "$0")/.." uninstall DESTDIR="$T/keep" PREFIX=/usr/local >/dev/null 2>&1
+    check "uninstall rc with a user file present" "0" "$?"
+    check "user file survives uninstall" "mine" \
+        "$(cat "$T/keep/usr/local/share/secrets/notes.txt" 2>/dev/null)"
 
     # install must not hand the caller's umask to the directories it creates:
     # under `umask 077` a root install would otherwise be unreadable to every
@@ -279,5 +315,8 @@ if grep -rIl 'ghp_abc123' "$SECRETS_DIR" 2>/dev/null | grep -q .; then
     bad "plaintext found in store"
 else ok "no plaintext in store"; fi
 
+# List failures before the tally so `... | tail -1` still shows the summary
+# while a captured run says which checks failed.
+[ "$fail" -eq 0 ] || printf '\nfailed checks:%s\n' "$failed"
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
