@@ -7,7 +7,9 @@ or its Rust implementation [rage](https://github.com/str4d/rage). A POSIX
 ```console
 $ secrets init
 secrets: backend    age
+secrets: identity   ~/.secrets/identity.txt
 secrets: public key age1levmga375nt6rjs69al874uh4xjpmdng87up5g7v9u2vhu3hmddqtt9d4r
+secrets: back up the identity -- without it every .age file is unrecoverable
 $ printf 'ghp_abc123\n' | secrets enc github
 $ secrets dec github
 ghp_abc123
@@ -103,9 +105,12 @@ set -eu
 export GITHUB_TOKEN="$(secrets dec github)"
 ```
 
-Helper functions use subshell bodies, so sourcing leaks no variables into
-your shell. This also works from your `.bashrc` if you prefer the function
-over the command.
+Adjust the path above to wherever you installed the library — this
+example matches `PREFIX=~/.local`, but a default `make install` puts it
+under `/usr/local/share/secrets/secrets-lib.sh` instead. Helper functions
+use subshell bodies, so sourcing leaks no variables into your shell. This
+also works from your `.bashrc` if you prefer the function over the
+command.
 
 ### Configuration
 
