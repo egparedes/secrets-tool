@@ -22,6 +22,7 @@
 #   SECRETS_IDENTITY    private key, for decrypt   (default $SECRETS_DIR/identity.txt)
 #   SECRETS_RECIPIENTS  public keys, for encrypt   (default $SECRETS_DIR/recipients.txt)
 #   SECRETS_ARMOR       1 = ASCII-armored output   (default 0, binary)
+#   SECRETS_LIB         library path, CLI only     (see search order in README)
 #
 # The keygen tool is derived from the backend name: age -> age-keygen,
 # rage -> rage-keygen, /opt/age -> /opt/age-keygen.
@@ -40,10 +41,9 @@
 #               eval "$(secrets completions zsh)"      # zsh, after compinit
 #               secrets completions fish > ~/.config/fish/completions/secrets.fish
 #
-# Portability notes: strictly POSIX except mktemp(1), which is not in POSIX
-# but is universal (coreutils, busybox, BSD, macOS) and has no safe
-# POSIX-only substitute. Helper functions use subshell bodies `f() (...)` --
-# valid POSIX -- so no variables leak into the sourcing shell.
+# Two ways in: run the `secrets` command, which finds and sources this file,
+# or source this file yourself and call the `secrets` function directly.
+# Sourcing leaks nothing -- helper functions use subshell bodies `f() (...)`.
 #
 # Tested with age v1.3.1 and rage v0.11.1 under dash, bash, and zsh.
 # ─────────────────────────────────────────────────────────────────────────────
