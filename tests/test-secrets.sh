@@ -683,6 +683,50 @@ check "migrated secret decrypts" "legacy-value" "$( SECRETS_DIR="$L"; secrets de
 ( SECRETS_DIR="$L"; secrets migrate ) >/dev/null 2>&1
 check "migrate refuses to run twice" "1" "$?"
 
+echo "== migrate never clobbers, and never claims success while locked out =="
+# A stale pre-0.2 blob must not silently replace a live entry of the same
+# name -- restoring an old backup beside a migrated store is enough to hit it.
+t_cl="$T/clobber"
+( SECRETS_DIR="$t_cl"; secrets init ) >/dev/null 2>&1
+printf 'LIVE-VALUE\n' | ( SECRETS_DIR="$t_cl"; secrets enc dbpass )
+"$AGEBIN" -e -R "$t_cl/store/.age-recipients" -o "$t_cl/dbpass.age" <<'EOF'
+STALE-VALUE
+EOF
+t_err=$( SECRETS_DIR="$t_cl"; secrets migrate 2>&1 >/dev/null )
+check "migrate refuses to overwrite a live entry" "1" "$?"
+printf '%s' "$t_err" | grep -q 'already exists in the store'
+check "and says which entry blocked it" "0" "$?"
+rm -f "$t_cl/dbpass.age"
+check "the live entry kept its value" "LIVE-VALUE" "$( SECRETS_DIR="$t_cl"; secrets dec dbpass )"
+
+# A stray identity.txt beside a healthy store must not lock it out forever
+# with migrate reporting success and changing nothing.
+t_id="$T/strayid"
+( SECRETS_DIR="$t_id"; secrets init ) >/dev/null 2>&1
+printf 'v\n' | ( SECRETS_DIR="$t_id"; secrets enc alpha )
+printf 'an old key backup\n' > "$t_id/identity.txt"
+( SECRETS_DIR="$t_id"; secrets ls ) >/dev/null 2>&1
+check "a stray identity.txt trips the guard" "4" "$?"
+t_err=$( SECRETS_DIR="$t_id"; secrets migrate 2>&1 >/dev/null )
+check "migrate does not report success for it" "1" "$?"
+printf '%s' "$t_err" | grep -q 'identity.txt'
+check "and names the file blocking it" "0" "$?"
+check "the real identity was not replaced" "1" \
+    "$(grep -c 'AGE-SECRET-KEY' "$t_id/identities")"
+rm -f "$t_id/identity.txt"
+( SECRETS_DIR="$t_id"; secrets ls ) >/dev/null 2>&1
+check "removing it unlocks the store" "0" "$?"
+check "and the store still works" "v" "$( SECRETS_DIR="$t_id"; secrets dec alpha )"
+
+# same for recipients.txt
+t_rc="$T/strayrcp"
+( SECRETS_DIR="$t_rc"; secrets init ) >/dev/null 2>&1
+printf 'old recipients\n' > "$t_rc/recipients.txt"
+( SECRETS_DIR="$t_rc"; secrets migrate ) >/dev/null 2>&1
+check "a stray recipients.txt is refused too" "1" "$?"
+check "the real recipients file is untouched" "1" \
+    "$(grep -c '^age1' "$t_rc/store/.age-recipients")"
+
 echo "== completions emit and parse =="
 secrets completions bash > "$T/c.bash"; check "bash emit rc" "0" "$?"
 bash -n "$T/c.bash"; check "bash completion parses" "0" "$?"
