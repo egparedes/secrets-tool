@@ -266,10 +266,16 @@ Removing a machine is the reverse: delete its line, `secrets rekey`. Note
 rekeying does not retroactively protect secrets a removed key already saw —
 rotate those values.
 
-`rekey` is all-or-nothing: it stages every re-encrypted blob first, and its
-install pass hard-links each original aside before replacing it, so a
-failure part way through puts everything back. An interrupt cannot lose an
-entry, but it can leave a `.rekey.*` directory in the store; that directory
+`rekey` never loses an entry. It stages every re-encrypted blob first, and
+its install pass hard-links each original aside before replacing it, so the
+entry always exists at its real path. A *failure* — a bad blob, a full disk,
+a permission error — rolls every entry back and changes nothing.
+
+An **interrupt** is different: it stops, it does not roll back. No entry is
+lost, but the store can be left partly on the new recipients and partly on
+the old, which matters for exactly the revocation this command exists for.
+`secrets rekey` says so when interrupted, and re-running it finishes the
+job. An interrupt can also leave a `.rekey.*` directory in the store; it
 holds nothing you need and is safe to delete.
 
 ## Testing

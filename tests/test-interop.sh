@@ -119,9 +119,12 @@ if command -v pago >/dev/null 2>&1 && command -v pago-agent >/dev/null 2>&1 &&
     printf '%s' "$i_out" | grep -q 'pago-written'
     check "a wrong master password does not decrypt" "1" "$?"
 
-    # the unwrapped identity is a temporary; none may survive the command
+    # The unwrapped identity is a temporary; none holding key material may
+    # survive. Counting every matching file would make this hostage to
+    # anything else on the machine, so only non-empty ones count.
     check "no decrypted identity left behind" "0" \
-        "$(find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' 2>/dev/null | wc -l)"
+        "$(find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' \
+            -size +0c 2>/dev/null | wc -l | tr -d ' ')"
 
     pago agent stop >/dev/null 2>&1
     unset PAGO_DIR PAGO_GIT PAGO_MEMLOCK PAGO_SOCK

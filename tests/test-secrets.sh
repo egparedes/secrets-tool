@@ -37,6 +37,14 @@ t_idtmp() {
     find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' \
         2>/dev/null | wc -l | tr -d ' '
 }
+# An interrupt can strand an *empty* temp: mktemp creates the file inside a
+# command substitution, before the shell can record its name to trap on, and
+# POSIX sh has no way to close that. What must never survive is a file with
+# key material in it, so that is what the interrupt checks assert.
+t_idtmp_nonempty() {
+    find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' \
+        -size +0c 2>/dev/null | wc -l | tr -d ' '
+}
 
 printf 'backend: %s\n' "$(_secrets_age)"
 AGEBIN=$(_secrets_age)
@@ -195,10 +203,11 @@ echo "== rekey's install pass never lets an entry stop existing =="
 # lose the in-flight entry.
 t_ln="$T/linkinstall"
 mkdir -p "$T/shim"
-cat > "$T/shim/chmod" <<'SHIM'
+t_realchmod=$(command -v chmod)
+cat > "$T/shim/chmod" <<SHIM
 #!/bin/sh
-case "$*" in *ccc*) echo "chmod: simulated failure" >&2; exit 1 ;; esac
-exec /bin/chmod "$@"
+case "\$*" in *ccc*) : > "$T/shim-fired"; echo "chmod: simulated failure" >&2; exit 1 ;; esac
+exec $t_realchmod "\$@"
 SHIM
 chmod 755 "$T/shim/chmod"
 ( SECRETS_DIR="$t_ln"; secrets init ) >/dev/null 2>&1
@@ -206,8 +215,10 @@ for t_n in aaa bbb ccc ddd; do
     printf 'V-%s\n' "$t_n" | ( SECRETS_DIR="$t_ln"; secrets enc "$t_n" )
 done
 "$KG" -y "$T/id2.txt" >> "$t_ln/store/.age-recipients"
+rm -f "$T/shim-fired"
 ( SECRETS_DIR="$t_ln"; PATH="$T/shim:$PATH"; secrets rekey ) >/dev/null 2>&1
 check "rekey fails when an install step fails" "1" "$?"
+check "the shim actually fired" "1" "$([ -f "$T/shim-fired" ] && echo 1 || echo 0)"
 check "the in-flight entry still exists" "1" \
     "$([ -f "$t_ln/store/ccc.age" ] && echo 1 || echo 0)"
 check "every entry still decrypts" "V-aaa V-bbb V-ccc V-ddd" \
@@ -218,6 +229,71 @@ check "and none was left rekeyed" "0" \
     "$("$AGEBIN" -d -i "$T/id2.txt" "$t_ln/store/aaa.age" >/dev/null 2>&1 && echo 1 || echo 0)"
 check "no stage dir left" "0" "$(find "$t_ln" -name '.rekey.*' | wc -l)"
 
+echo "== rekey survives a store with no hard links =="
+# $stage is inside the store, so the original is linked aside rather than
+# copied. On a filesystem without hard links (FAT, some network mounts) the
+# cp fallback has to carry it.
+mkdir -p "$T/shimln"
+cat > "$T/shimln/ln" <<SHIM
+#!/bin/sh
+: > "$T/ln-refused"
+exit 1
+SHIM
+chmod 755 "$T/shimln/ln"
+t_nl="$T/nolinks"
+( SECRETS_DIR="$t_nl"; secrets init ) >/dev/null 2>&1
+printf 'NL\n' | ( SECRETS_DIR="$t_nl"; secrets enc solo )
+"$KG" -y "$T/id2.txt" >> "$t_nl/store/.age-recipients"
+rm -f "$T/ln-refused"
+( SECRETS_DIR="$t_nl"; PATH="$T/shimln:$PATH"; secrets rekey ) >/dev/null 2>&1
+check "rekey succeeds without hard links" "0" "$?"
+check "the ln refusal actually happened" "1" \
+    "$([ -f "$T/ln-refused" ] && echo 1 || echo 0)"
+check "the entry still decrypts" "NL" "$( SECRETS_DIR="$t_nl"; secrets dec solo )"
+check "and it was rekeyed" "NL" "$("$AGEBIN" -d -i "$T/id2.txt" "$t_nl/store/solo.age")"
+
+echo "== a rollback that itself fails keeps the originals and says so =="
+# The highest-consequence branch in the file: if the restore cannot run, the
+# staging tree holds the only copy of the old blobs and must NOT be deleted.
+mkdir -p "$T/shimmv"
+cat > "$T/shimmv/mv" <<SHIM
+#!/bin/sh
+case "\$*" in
+    *.orig/*)  : > "$T/restore-blocked"; echo "mv: simulated restore failure" >&2; exit 1 ;;
+    *ccc*)     echo "mv: simulated install failure" >&2; exit 1 ;;
+esac
+exec $(command -v mv) "\$@"
+SHIM
+chmod 755 "$T/shimmv/mv"
+t_fr="$T/failedrollback"
+( SECRETS_DIR="$t_fr"; secrets init ) >/dev/null 2>&1
+for t_n in aaa bbb ccc; do
+    printf 'V-%s\n' "$t_n" | ( SECRETS_DIR="$t_fr"; secrets enc "$t_n" )
+done
+"$KG" -y "$T/id2.txt" >> "$t_fr/store/.age-recipients"
+rm -f "$T/restore-blocked"
+t_err=$( SECRETS_DIR="$t_fr"; PATH="$T/shimmv:$PATH"; secrets rekey 2>&1 >/dev/null )
+check "rekey fails" "1" "$?"
+check "the restore really was blocked" "1" \
+    "$([ -f "$T/restore-blocked" ] && echo 1 || echo 0)"
+printf '%s' "$t_err" | grep -q 'could not restore'
+check "it names the entries it could not restore" "0" "$?"
+printf '%s' "$t_err" | grep -q 'could not roll back'
+check "and does not claim nothing changed" "0" "$?"
+printf '%s' "$t_err" | grep -q 'nothing changed'
+check "the reassuring message is withheld" "1" "$?"
+check "the staging tree is KEPT, not deleted" "1" \
+    "$(find "$t_fr" -name '.rekey.*' -type d | wc -l | tr -d ' ')"
+check "and it still holds the originals" "1" \
+    "$(find "$t_fr" -path '*/.orig/aaa.age' | wc -l | tr -d ' ')"
+check "every entry is still decryptable from somewhere" "V-aaa V-bbb V-ccc" \
+    "$( SECRETS_DIR="$t_fr"
+        printf '%s %s %s' \
+            "$("$AGEBIN" -d -i "$t_fr/identities" "$(find "$t_fr" -path '*/.orig/aaa.age')")" \
+            "$("$AGEBIN" -d -i "$t_fr/identities" "$(find "$t_fr" -path '*/.orig/bbb.age')")" \
+            "$(secrets dec ccc)" )"
+rm -rf "$t_fr"
+
 echo "== an interrupted rekey must not destroy an entry =="
 # Regression test for a rollback that moved originals out of the store: a
 # signal then deleted the staging tree while an entry lived only inside it.
@@ -225,14 +301,14 @@ echo "== an interrupted rekey must not destroy an entry =="
 # would -- a backgrounded job has SIGINT ignored on entry and cannot trap it.
 if command -v script >/dev/null 2>&1; then
     t_int="$T/interrupt"
-    cat > "$T/shim/slowchmod" <<'SHIM'
-#!/bin/sh
-case "$*" in *ccc*) sleep 12 ;; esac
-exec /bin/chmod "$@"
-SHIM
     mkdir -p "$T/shim2"
-    cp "$T/shim/slowchmod" "$T/shim2/chmod"
+    cat > "$T/shim2/chmod" <<SHIM
+#!/bin/sh
+case "\$*" in *ccc*) : > "$T/slow-fired"; sleep 12 ;; esac
+exec $t_realchmod "\$@"
+SHIM
     chmod 755 "$T/shim2/chmod"
+    rm -f "$T/slow-fired"
     ( SECRETS_DIR="$t_int"; secrets init ) >/dev/null 2>&1
     for t_n in aaa bbb ccc ddd; do
         printf 'V-%s\n' "$t_n" | ( SECRETS_DIR="$t_int"; secrets enc "$t_n" )
@@ -241,6 +317,10 @@ SHIM
     { sleep 5; printf '\003'; sleep 3; } | script -qec \
         "env SECRETS_DIR=$t_int PATH=$T/shim2:$BINDIR:$PATH secrets rekey" \
         /dev/null >/dev/null 2>&1
+    # Without this the check is vacuous: on a slow runner the rekey can
+    # finish before the ^C lands, and every assertion below still passes.
+    check "the interrupt landed inside the install pass" "1" \
+        "$([ -f "$T/slow-fired" ] && echo 1 || echo 0)"
     check "no entry was destroyed by the interrupt" "4" \
         "$(find "$t_int/store" -maxdepth 1 -name '*.age' | wc -l | tr -d ' ')"
     check "and all four still decrypt" "V-aaa V-bbb V-ccc V-ddd" \
@@ -533,8 +613,8 @@ if command -v script >/dev/null 2>&1 &&
     printf 'v\n' | ( SECRETS_DIR="$G2"; secrets enc svc2 )
     { sleep 3; printf '\003'; sleep 2; } | script -qec \
         "env SECRETS_DIR=$G2 $BINDIR/secrets dec svc2" /dev/null >/dev/null 2>&1
-    check "an interrupt at the passphrase prompt strands nothing" "$t_idbase" \
-        "$(t_idtmp)"
+    check "an interrupt at the passphrase prompt strands no key material" "0" \
+        "$(t_idtmp_nonempty)"
 else
     echo "  skip pago encrypted-identities checks (no script(1) pty available)"
 fi

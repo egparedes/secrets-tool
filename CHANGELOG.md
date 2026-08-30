@@ -73,7 +73,9 @@ guarantees — the layout and the naming rules changed underneath them.
   recipient sets, and the cleanup trap then deleted the remaining work. Each
   original is now hard-**linked** into the staging tree before its
   replacement lands, so the entry never stops existing at its real path: an
-  interrupt cannot destroy it, and a failure rolls every entry back. (An
+  interrupt cannot destroy it, and a failure rolls every entry back. An
+  interrupt does not roll back — it stops, leaving the store possibly part
+  rekeyed, and now says so. (An
   interim version of this fix *moved* the original aside instead, which
   opened a window where a signal destroyed the in-flight entry outright —
   worse than the bug it replaced. It never shipped outside review.)
@@ -81,6 +83,14 @@ guarantees — the layout and the naming rules changed underneath them.
   up lets execution resume afterwards, in dash, bash and zsh alike — so a
   signal ran the cleanup and then carried on against the tree it had just
   deleted. Cleanup stays on `EXIT`; signals exit and let `EXIT` do it.
+- **`migrate` never overwrites a live entry, and never claims success while
+  the store is still locked out.** Keying the guard off leftover artifacts
+  (rather than off `store/` existing) removed the check that stopped a stale
+  pre-0.2 blob from silently replacing a 0.2 entry of the same name, and let
+  `migrate` exit 0 having moved nothing when `identities` already existed —
+  leaving the store permanently refused with no way out from inside the
+  tool. `migrate` now refuses to clobber, names the file blocking it, and
+  re-checks before reporting success; the guard lists what it found.
 - **A failed `migrate` no longer bricks the store.** The guard keyed off
   `store/` existing, so any failure after that directory was created was
   terminal: the guard stopped firing, `secrets ls` reported an empty store,

@@ -196,6 +196,10 @@ _secrets_identity_open() (
 
     agebin=$(_secrets_age) || exit $?
     tmp=''
+    # Armed before mktemp: everything from the moment the file has a name is
+    # covered. The gap left is the command substitution itself, in which the
+    # file exists but is still empty.
+    trap '[ -z "$tmp" ] || rm -f "$tmp"; exit 1' HUP INT TERM
     for dir in /dev/shm "${TMPDIR:-/tmp}"; do
         if [ -d "$dir" ] && [ -w "$dir" ]; then
             tmp=$(mktemp "$dir/.secrets-id.XXXXXX" 2>/dev/null) && break
@@ -207,10 +211,6 @@ _secrets_identity_open() (
         exit 1
     fi
     chmod 600 "$tmp" || { rm -f "$tmp"; exit 1; }
-    # The caller's trap cannot fire for this file yet -- it guards $idf, which
-    # stays empty until this substitution returns -- and age sits at a human's
-    # passphrase prompt in between. Guard it here for the length of that wait.
-    trap 'rm -f "$tmp"; exit 1' HUP INT TERM
 
     # Prompting happens on the terminal; stdout here is a command substitution.
     if "$agebin" -d -o "$tmp" "$SECRETS_IDENTITY"; then
@@ -300,8 +300,16 @@ _secrets_has_legacy() (
 # store would look empty and healthy.
 _secrets_legacy_guard() (
     _secrets_has_legacy || exit 0
-    printf 'secrets: %s holds a pre-0.2 flat store (run: secrets migrate)\n' \
+    printf 'secrets: %s holds pre-0.2 files (run: secrets migrate):\n' \
         "$SECRETS_DIR" >&2
+    [ -e "$SECRETS_DIR/identity.txt" ] &&
+        printf 'secrets:   identity.txt\n' >&2
+    [ -e "$SECRETS_DIR/recipients.txt" ] &&
+        printf 'secrets:   recipients.txt\n' >&2
+    find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null |
+        while IFS= read -r f; do
+            [ -n "$f" ] && printf 'secrets:   %s\n' "${f##*/}" >&2
+        done
     exit 4
 )
 
@@ -554,7 +562,11 @@ _secrets_rekey() (
     # unwrapped identity are temporaries, and no branch below may outlive them.
     trap '[ -z "$stage" ] || rm -rf "$stage"
           [ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' EXIT
-    trap 'exit 1' HUP INT TERM
+    # An interrupt rolls nothing back -- it just stops. No entry can be lost,
+    # but the store may be left half on the new recipients and half on the
+    # old, which matters most to the very workflow rekey exists for.
+    trap 'printf "secrets: interrupted; the store may be partly rekeyed -- re-run: secrets rekey\n" >&2
+          exit 1' HUP INT TERM
     stage=$(mktemp -d "$SECRETS_STORE/.rekey.XXXXXX") || exit 1
     idf=$(_secrets_identity_open) || exit 3
 
@@ -631,8 +643,10 @@ _secrets_rekey() (
         else
             printf 'secrets: failed to install %s and could not roll back; the\n' \
                 "$failed_at" >&2
-            printf 'secrets: originals are kept in %s -- restore them by hand\n' \
+            printf 'secrets: originals are kept in %s/.orig -- restore them by\n' \
                 "$stage" >&2
+            printf 'secrets: hand, then delete that directory: it holds blobs on the\n' >&2
+            printf 'secrets: old recipients, which is what this rekey was retiring\n' >&2
             stage=''                 # keep it: it holds the only copy
         fi
         exit 1
@@ -664,15 +678,36 @@ _secrets_migrate() (
     find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null > "$list" || exit 1
     while IFS= read -r f; do
         [ -n "$f" ] || continue
+        # A pre-0.2 blob must never overwrite a live entry of the same name:
+        # a stale one restored from a backup would silently replace it.
+        if [ -e "$SECRETS_STORE/${f##*/}" ]; then
+            printf 'secrets: %s already exists in the store\n' \
+                "$SECRETS_STORE/${f##*/}" >&2
+            printf 'secrets: move or delete %s by hand, then run: secrets migrate\n' \
+                "$f" >&2
+            exit 1
+        fi
         mv -- "$f" "$SECRETS_STORE/${f##*/}" || exit 1
         n=$((n + 1))
     done < "$list"
 
-    if [ -e "$SECRETS_DIR/identity.txt" ] && [ ! -e "$SECRETS_IDENTITY" ]; then
+    rf=${SECRETS_RECIPIENTS:-$SECRETS_STORE/.age-recipients}
+    if [ -e "$SECRETS_DIR/identity.txt" ] && [ -e "$SECRETS_IDENTITY" ]; then
+        printf 'secrets: both %s and %s exist\n' \
+            "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" >&2
+        printf 'secrets: move or delete the old identity.txt by hand, then run: secrets migrate\n' >&2
+        exit 1
+    fi
+    if [ -e "$SECRETS_DIR/identity.txt" ]; then
         mv -- "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" || exit 1
     fi
-    rf=${SECRETS_RECIPIENTS:-$SECRETS_STORE/.age-recipients}
-    if [ -e "$SECRETS_DIR/recipients.txt" ] && [ ! -e "$rf" ]; then
+    if [ -e "$SECRETS_DIR/recipients.txt" ] && [ -e "$rf" ]; then
+        printf 'secrets: both %s and %s exist\n' \
+            "$SECRETS_DIR/recipients.txt" "$rf" >&2
+        printf 'secrets: move or delete the old recipients.txt by hand, then run: secrets migrate\n' >&2
+        exit 1
+    fi
+    if [ -e "$SECRETS_DIR/recipients.txt" ]; then
         mv -- "$SECRETS_DIR/recipients.txt" "$rf" || exit 1
     fi
 
@@ -684,6 +719,14 @@ _secrets_migrate() (
             printf 'secrets: left %s alone: it is a directory, not an entry\n' \
                 "$f" >&2
         done
+
+    # Exiting 0 has to mean the guard will not refuse the store on the next
+    # command; anything still here would otherwise lock it out silently.
+    if _secrets_has_legacy; then
+        printf 'secrets: migration incomplete, %s still holds pre-0.2 files\n' \
+            "$SECRETS_DIR" >&2
+        exit 1
+    fi
 
     printf 'secrets: moved %d secret(s) into %s\n' "$n" "$SECRETS_STORE" >&2
     printf 'secrets: identity   %s\n' "$SECRETS_IDENTITY" >&2
