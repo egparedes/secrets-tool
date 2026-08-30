@@ -281,19 +281,59 @@ _secrets_prune() (
     exit 0
 )
 
+# Print $1 with its directory resolved, so the same file always spells the
+# same way. A trailing slash on SECRETS_DIR is enough to produce two
+# spellings of one path ("$D//identities.age" against find's
+# "$D/identities.age"), and a plain string compare misses it. POSIX test has
+# no -ef, so canonicalise instead: `cd -P` collapses '//', '.', '..' and
+# symlinked directories. Fails when the directory does not exist.
+_secrets_canon() (
+    case "$1" in
+        */*) dir=${1%/*}; base=${1##*/} ;;
+        *)   dir=.;       base=$1 ;;
+    esac
+    [ -n "$dir" ] || dir=/
+    dir=$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P) || exit 1
+    case "$dir" in
+        */) printf '%s%s\n' "$dir" "$base" ;;
+        *)  printf '%s/%s\n' "$dir" "$base" ;;
+    esac
+)
+
+# True when $1 and $2 name the same file.
+_secrets_same_file() (
+    [ -n "${1-}" ] && [ -n "${2-}" ] || exit 1
+    a=$(_secrets_canon "$1") || exit 1
+    b=$(_secrets_canon "$2") || exit 1
+    [ "$a" = "$b" ]
+)
+
 # Print the pre-0.2 blobs sitting directly in $SECRETS_DIR. A top-level
 # *.age file that this configuration already uses -- SECRETS_IDENTITY or
 # SECRETS_RECIPIENTS may legitimately name one -- is not a leftover, and
 # moving it into the store would file the live private key as an entry.
+#
+# The comparison is by canonical path, not by string: see _secrets_canon.
+# -L so a symlinked base directory is traversed, matching _secrets_ls.
 _secrets_legacy_blobs() (
     [ -d "$SECRETS_DIR" ] || exit 0
-    find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null |
+    # find on its own, not as the head of a pipeline: POSIX sh has no
+    # pipefail, and a base directory find cannot read would otherwise come
+    # back as a short list -- which is how a store with stranded blobs ends
+    # up looking empty and healthy.
+    found=$(find -L "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null) || {
+        printf 'secrets: cannot list %s in full\n' "$SECRETS_DIR" >&2
+        exit 1
+    }
+    [ -n "$found" ] || exit 0
+    printf '%s\n' "$found" |
         while IFS= read -r f; do
             [ -n "$f" ] || continue
-            [ "$f" = "$SECRETS_IDENTITY" ] && continue
-            [ -n "${SECRETS_RECIPIENTS:-}" ] && [ "$f" = "$SECRETS_RECIPIENTS" ] && continue
+            _secrets_same_file "$f" "$SECRETS_IDENTITY" && continue
+            _secrets_same_file "$f" "${SECRETS_RECIPIENTS:-}" && continue
             printf '%s\n' "$f"
         done
+    exit 0
 )
 
 # True when $SECRETS_DIR still holds a pre-0.2 flat store's artifacts. A file
@@ -302,10 +342,13 @@ _secrets_legacy_blobs() (
 # identity, and treating it as a leftover locked the store out for good.
 _secrets_has_legacy() (
     if [ -e "$SECRETS_DIR/identity.txt" ] &&
-       [ "$SECRETS_DIR/identity.txt" != "$SECRETS_IDENTITY" ]; then exit 0; fi
+       ! _secrets_same_file "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY"; then exit 0; fi
     if [ -e "$SECRETS_DIR/recipients.txt" ] &&
-       [ "$SECRETS_DIR/recipients.txt" != "${SECRETS_RECIPIENTS:-}" ]; then exit 0; fi
-    [ -n "$(_secrets_legacy_blobs | head -n 1)" ] && exit 0
+       ! _secrets_same_file "$SECRETS_DIR/recipients.txt" "${SECRETS_RECIPIENTS:-}"; then exit 0; fi
+    # A scan we could not complete is not proof of a clean store: refuse
+    # rather than open one whose blobs we may simply have failed to see.
+    blobs=$(_secrets_legacy_blobs) || exit 0
+    [ -n "$blobs" ] && exit 0
     exit 1
 )
 
@@ -319,10 +362,10 @@ _secrets_legacy_guard() (
     printf 'secrets: %s holds pre-0.2 files (run: secrets migrate):\n' \
         "$SECRETS_DIR" >&2
     [ -e "$SECRETS_DIR/identity.txt" ] &&
-        [ "$SECRETS_DIR/identity.txt" != "$SECRETS_IDENTITY" ] &&
+        ! _secrets_same_file "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" &&
         printf 'secrets:   identity.txt\n' >&2
     [ -e "$SECRETS_DIR/recipients.txt" ] &&
-        [ "$SECRETS_DIR/recipients.txt" != "${SECRETS_RECIPIENTS:-}" ] &&
+        ! _secrets_same_file "$SECRETS_DIR/recipients.txt" "${SECRETS_RECIPIENTS:-}" &&
         printf 'secrets:   recipients.txt\n' >&2
     _secrets_legacy_blobs |
         while IFS= read -r f; do
@@ -717,7 +760,7 @@ _secrets_migrate() (
 
     rf=${SECRETS_RECIPIENTS:-$SECRETS_STORE/.age-recipients}
     if [ -e "$SECRETS_DIR/identity.txt" ] &&
-       [ "$SECRETS_DIR/identity.txt" != "$SECRETS_IDENTITY" ] &&
+       ! _secrets_same_file "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" &&
        [ -e "$SECRETS_IDENTITY" ]; then
         printf 'secrets: both %s and %s exist\n' \
             "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" >&2
@@ -725,18 +768,18 @@ _secrets_migrate() (
         exit 1
     fi
     if [ -e "$SECRETS_DIR/identity.txt" ] &&
-       [ "$SECRETS_DIR/identity.txt" != "$SECRETS_IDENTITY" ]; then
+       ! _secrets_same_file "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY"; then
         mv -- "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" || exit 1
     fi
     if [ -e "$SECRETS_DIR/recipients.txt" ] &&
-       [ "$SECRETS_DIR/recipients.txt" != "$rf" ] && [ -e "$rf" ]; then
+       ! _secrets_same_file "$SECRETS_DIR/recipients.txt" "$rf" && [ -e "$rf" ]; then
         printf 'secrets: both %s and %s exist\n' \
             "$SECRETS_DIR/recipients.txt" "$rf" >&2
         printf 'secrets: move or delete the old recipients.txt by hand, then run: secrets migrate\n' >&2
         exit 1
     fi
     if [ -e "$SECRETS_DIR/recipients.txt" ] &&
-       [ "$SECRETS_DIR/recipients.txt" != "$rf" ]; then
+       ! _secrets_same_file "$SECRETS_DIR/recipients.txt" "$rf"; then
         mv -- "$SECRETS_DIR/recipients.txt" "$rf" || exit 1
     fi
 

@@ -316,19 +316,62 @@ SHIM
     "$KG" -y "$T/id2.txt" >> "$t_int/store/.age-recipients"
     { sleep 5; printf '\003'; sleep 3; } | script -qec \
         "env SECRETS_DIR=$t_int PATH=$T/shim2:$BINDIR:$PATH secrets rekey" \
-        /dev/null >/dev/null 2>&1
+        /dev/null > "$T/int-out" 2>&1
     # Without this the check is vacuous: on a slow runner the rekey can
     # finish before the ^C lands, and every assertion below still passes.
     check "the interrupt landed inside the install pass" "1" \
         "$([ -f "$T/slow-fired" ] && echo 1 || echo 0)"
     check "no entry was destroyed by the interrupt" "4" \
         "$(find "$t_int/store" -maxdepth 1 -name '*.age' | wc -l | tr -d ' ')"
+    # Interrupted mid-install the store really can be split, and saying
+    # "nothing changed" there would be a lie in the direction that matters.
+    grep -q 'may be partly rekeyed' "$T/int-out"
+    check "it warns the store may be partly rekeyed" "0" "$?"
     check "and all four still decrypt" "V-aaa V-bbb V-ccc V-ddd" \
         "$( SECRETS_DIR="$t_int"
             printf '%s %s %s %s' "$(secrets dec aaa)" "$(secrets dec bbb)" \
                 "$(secrets dec ccc)" "$(secrets dec ddd)" )"
 else
     echo "  skip interrupted-rekey check (no script(1) pty available)"
+fi
+
+echo "== an interrupt while staging must not claim the store changed =="
+# Staging writes only inside the staging tree, so "nothing changed" is the
+# truth there -- and staging is the likeliest moment to Ctrl-C. Reporting a
+# possibly-part-rekeyed store there trains users to ignore the warning; the
+# reverse, reporting "nothing changed" mid-install, is an outright lie.
+if command -v script >/dev/null 2>&1; then
+    mkdir -p "$T/shimage"
+    cat > "$T/shimage/slowage" <<SHIM
+#!/bin/sh
+for a in "\$@"; do
+    case \$a in *sss.age) : > "$T/stage-fired"; sleep 12 ;; esac
+done
+exec $AGEBIN "\$@"
+SHIM
+    chmod 755 "$T/shimage/slowage"
+    t_stg="$T/staginterrupt"
+    ( SECRETS_DIR="$t_stg"; secrets init ) >/dev/null 2>&1
+    for t_n in ppp sss; do
+        printf 'V-%s\n' "$t_n" | ( SECRETS_DIR="$t_stg"; secrets enc "$t_n" )
+    done
+    "$KG" -y "$T/id2.txt" >> "$t_stg/store/.age-recipients"
+    rm -f "$T/stage-fired"
+    { sleep 5; printf '\003'; sleep 3; } | script -qec \
+        "env SECRETS_DIR=$t_stg SECRETS_AGE=$T/shimage/slowage $BINDIR/secrets rekey" \
+        /dev/null > "$T/stg-out" 2>&1
+    check "the interrupt landed during staging" "1" \
+        "$([ -f "$T/stage-fired" ] && echo 1 || echo 0)"
+    grep -q 'nothing changed' "$T/stg-out"
+    check "it reports that nothing changed" "0" "$?"
+    grep -q 'may be partly rekeyed' "$T/stg-out"
+    check "and does not warn of a part-rekeyed store" "1" "$?"
+    check "no entry was rekeyed" "0" \
+        "$("$AGEBIN" -d -i "$T/id2.txt" "$t_stg/store/ppp.age" >/dev/null 2>&1 && echo 1 || echo 0)"
+    check "both entries still decrypt" "V-ppp V-sss" \
+        "$( SECRETS_DIR="$t_stg"; printf '%s %s' "$(secrets dec ppp)" "$(secrets dec sss)" )"
+else
+    echo "  skip staging-interrupt checks (no script(1) pty available)"
 fi
 
 echo "== per-subtree .age-recipients (passage's walk) =="
@@ -732,6 +775,74 @@ check "and is not listed as an entry" "0" \
     "$( t_kaenv; secrets ls | grep -cx identities )"
 check "the real legacy blob did migrate" "legacy-value" \
     "$( t_kaenv; secrets dec legacy )"
+
+echo "== a configured path is recognised however it is spelled =="
+# The destination check compares canonical paths, not strings: a trailing
+# slash on SECRETS_DIR spells the same file two ways, and a string compare
+# missed it -- filing the live private key in the store as an entry.
+t_sl="$T/slash"
+mkdir -p "$t_sl"
+t_slenv() { export SECRETS_DIR="$t_sl/" SECRETS_IDENTITY="$t_sl//identities.age"; }
+( t_slenv; secrets init ) >/dev/null 2>&1
+"$AGEBIN" -e -R "$t_sl/store/.age-recipients" -o "$t_sl/genuine.age" <<'EOF'
+genuine
+EOF
+( t_slenv; secrets migrate ) >/dev/null 2>&1
+check "migrate rc with a trailing-slash SECRETS_DIR" "0" "$?"
+check "the private key stayed out of the store" "0" \
+    "$(grep -rl 'AGE-SECRET-KEY-' "$t_sl/store" 2>/dev/null | wc -l | tr -d ' ')"
+check "and only the real blob was migrated" "genuine" "$( t_slenv; secrets dec genuine )"
+
+# the same skip has to apply to SECRETS_RECIPIENTS
+t_rs="$T/rcpskip"
+mkdir -p "$t_rs/store"
+t_rsenv() { export SECRETS_DIR="$t_rs" SECRETS_RECIPIENTS="$t_rs/keys.age"; }
+"$KG" -y "$ID" > "$t_rs/keys.age"
+( t_rsenv; secrets ls ) >/dev/null 2>&1
+check "a configured SECRETS_RECIPIENTS is not a leftover" "0" "$?"
+
+# a symlinked base directory must still be scanned, as _secrets_ls does
+t_sy="$T/symbase"
+mkdir -p "$t_sy/real"
+ln -s "$t_sy/real" "$t_sy/link"
+cp "$ID" "$t_sy/real/identity.txt"
+"$KG" -y "$t_sy/real/identity.txt" > "$t_sy/real/recipients.txt"
+"$AGEBIN" -e -R "$t_sy/real/recipients.txt" -o "$t_sy/real/viasym.age" <<'EOF'
+via-symlink
+EOF
+( SECRETS_DIR="$t_sy/link"; secrets ls ) >/dev/null 2>&1
+check "a symlinked base dir is still scanned" "4" "$?"
+( SECRETS_DIR="$t_sy/link"; secrets migrate ) >/dev/null 2>&1
+check "and migrates" "0" "$?"
+check "its blob came across" "via-symlink" "$( SECRETS_DIR="$t_sy/link"; secrets dec viasym )"
+
+echo "== a base directory that cannot be scanned is refused, not opened =="
+# Masking find's status here recreates exactly the "empty and healthy" store
+# the backstop exists to prevent. Root ignores the permission, so this needs
+# an ordinary user.
+if [ "$(id -u)" -ne 0 ]; then
+    t_ur="$T/unreadable"
+    mkdir -p "$t_ur"
+    cp "$ID" "$t_ur/identity.txt"
+    "$KG" -y "$t_ur/identity.txt" > "$t_ur/recipients.txt"
+    "$AGEBIN" -e -R "$t_ur/recipients.txt" -o "$t_ur/hidden.age" <<'EOF'
+hidden
+EOF
+    # 333, not 733: the owner needs read stripped too, and this block runs
+    # as the user that owns the directory.
+    chmod 333 "$t_ur"
+    ( SECRETS_DIR="$t_ur"; secrets ls ) >/dev/null 2>&1
+    check "an unscannable base dir does not report an empty store" "4" "$?"
+    ( SECRETS_DIR="$t_ur"; secrets migrate ) >/dev/null 2>&1
+    check "and migrate refuses rather than moving nothing" "1" "$?"
+    chmod 755 "$t_ur"
+    check "the blob was never stranded" "1" \
+        "$([ -f "$t_ur/hidden.age" ] && echo 1 || echo 0)"
+    check "and the store opens once it is readable again" "4" \
+        "$( SECRETS_DIR="$t_ur"; secrets ls >/dev/null 2>&1; echo $? )"
+else
+    echo "  skip unscannable-base-dir checks (running as root)"
+fi
 
 echo "== migrate's backstop catches an artifact appearing mid-run =="
 # A *.age dropped into $SECRETS_DIR while migrate runs would otherwise leave
