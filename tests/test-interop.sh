@@ -131,4 +131,12 @@ fi
 
 [ "$fail" -eq 0 ] || printf '\nfailed checks:%s\n' "$failed"
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
+# A run where every block skipped verified nothing; reporting success for it
+# is a false green, and this suite exists precisely to check the claim.
+if [ "$pass" -eq 0 ] && [ "$fail" -eq 0 ]; then
+    printf '\nNOTHING WAS VERIFIED: install passage and/or pago to run this suite.\n' >&2
+    printf '  passage: https://github.com/FiloSottile/passage\n' >&2
+    printf '  pago:    go install dbohdan.com/pago/cmd/...@latest\n' >&2
+    exit 1
+fi
 [ "$fail" -eq 0 ]

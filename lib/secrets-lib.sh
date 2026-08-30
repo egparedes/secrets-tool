@@ -9,7 +9,7 @@
 #   secrets enc  [-f] NAME       encrypt stdin -> $SECRETS_STORE/NAME.age
 #   secrets dec  NAME            decrypt -> stdout, plaintext verbatim
 #   secrets ls                   list stored names
-#   secrets rm   NAME            delete a secret
+#   secrets rm   [-f] NAME       delete a secret (-f skips the prompt)
 #   secrets rename [-f] OLD NEW  rename a secret
 #   secrets recipients [NAME]    show who can decrypt
 #   secrets rekey                re-encrypt everything to current recipients
@@ -47,7 +47,7 @@
 #   SECRETS_IDENTITY    private key(s), decrypt    (default $SECRETS_DIR/identities)
 #   SECRETS_RECIPIENTS  pin one recipients file    (default: the .age-recipients walk)
 #   SECRETS_ARMOR       1 = ASCII-armored output   (default 0, binary)
-#   SECRETS_LIB         library path, CLI only     (see search order in README)
+#   SECRETS_LIB         library path, CLI only     (search order: bin/secrets)
 #
 # The keygen tool is derived from the backend name: age -> age-keygen,
 # rage -> rage-keygen, /opt/age -> /opt/age-keygen.
@@ -76,7 +76,8 @@
 # or source this file yourself and call the `secrets` function directly.
 # Sourcing leaks nothing -- helper functions use subshell bodies `f() (...)`.
 #
-# Tested with age v1.3.1 and rage v0.11.1 under dash, bash, and zsh.
+# CI runs the suite across {dash, bash, zsh} x {age, rage}, and the
+# interop suite against pinned passage and pago releases.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Sourcing must always succeed and must set nothing: SECRETS_STORE and
@@ -206,6 +207,10 @@ _secrets_identity_open() (
         exit 1
     fi
     chmod 600 "$tmp" || { rm -f "$tmp"; exit 1; }
+    # The caller's trap cannot fire for this file yet -- it guards $idf, which
+    # stays empty until this substitution returns -- and age sits at a human's
+    # passphrase prompt in between. Guard it here for the length of that wait.
+    trap 'rm -f "$tmp"' HUP INT TERM
 
     # Prompting happens on the terminal; stdout here is a command substitution.
     if "$agebin" -d -o "$tmp" "$SECRETS_IDENTITY"; then
@@ -222,10 +227,21 @@ _secrets_identity_open() (
 # which selects the .age-recipients to use; $3 is an already-opened plaintext
 # identity to fall back on when no recipients file governs that directory
 # (passing it keeps rekey from re-prompting once per entry).
+# Print 1 when the age file $1 is ASCII-armored, 0 otherwise. pago writes
+# armored entries; rekey uses this to keep each entry in the format it is
+# already in instead of converting the whole store.
+_secrets_armor_of() (
+    case $(head -n 1 "$1" 2>/dev/null) in
+        '-----BEGIN AGE ENCRYPTED FILE-----') printf '1\n' ;;
+        *) printf '0\n' ;;
+    esac
+)
+
 _secrets_encrypt_to() (
     out=$1
     sub=${2-}
     idf=${3-}
+    armor=${4-${SECRETS_ARMOR:-0}}
 
     agebin=$(_secrets_age) || exit $?
     rf=$(_secrets_recipients_for "$sub")
@@ -239,7 +255,7 @@ _secrets_encrypt_to() (
         fi
         set -- -i "$idf"
     fi
-    if [ "${SECRETS_ARMOR:-0}" = 1 ]; then
+    if [ "$armor" = 1 ]; then
         set -- -a "$@"
     fi
     "$agebin" -e "$@" -o "$out"
@@ -273,10 +289,10 @@ _secrets_legacy_guard() (
     legacy=''
     [ -e "$SECRETS_DIR/identity.txt" ] && legacy=1
     [ -e "$SECRETS_DIR/recipients.txt" ] && legacy=1
-    for f in "$SECRETS_DIR"/*.age; do
-        [ -e "$f" ] && legacy=1
-        break
-    done
+    # find, not a glob: zsh makes an unmatched glob a fatal error rather than
+    # leaving it literal, which would kill every subcommand on a fresh store.
+    [ -n "$(find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null |
+            head -n 1)" ] && legacy=1
     [ -n "$legacy" ] || exit 0
     printf 'secrets: %s holds a pre-0.2 flat store (run: secrets migrate)\n' \
         "$SECRETS_DIR" >&2
@@ -308,7 +324,10 @@ _secrets_init() (
     ( umask 077
       printf '# %s (added %s)\n%s\n' \
           "$(uname -n 2>/dev/null || echo host)" \
-          "$(date -u +%Y-%m-%d)" "$pub" >> "$rf" ) || exit 1
+          "$(date -u +%Y-%m-%d)" "$pub" >> "$rf" ) 2>/dev/null || {
+        printf 'secrets: cannot write recipients to %s\n' "$rf" >&2
+        exit 1
+    }
 
     printf 'secrets: backend    %s\n' "$(_secrets_age)" >&2
     printf 'secrets: store      %s\n' "$SECRETS_STORE" >&2
@@ -334,14 +353,18 @@ _secrets_enc() (
     [ -t 0 ] && printf 'secrets: reading plaintext from stdin, end with Ctrl-D\n' >&2
 
     ( umask 077 && mkdir -p "${out%/*}" ) || exit 1
+    tmp=''
+    trap '[ -z "$tmp" ] || rm -f "$tmp"' EXIT HUP INT TERM
     tmp=$(mktemp "${out%/*}/.tmp.XXXXXX") || exit 1
-    if _secrets_encrypt_to "$tmp" "$sub"; then
-        chmod 600 "$tmp" && mv -f -- "$tmp" "$out"
-    else
-        rm -f "$tmp"
+    if ! _secrets_encrypt_to "$tmp" "$sub"; then
         printf 'secrets: encryption failed, %s left untouched\n' "$out" >&2
         exit 1
     fi
+    if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$out"; then
+        printf 'secrets: could not install %s, left untouched\n' "$out" >&2
+        exit 1
+    fi
+    tmp=''
 )
 
 _secrets_dec() (
@@ -366,20 +389,51 @@ _secrets_dec() (
 _secrets_ls() (
     [ -d "$SECRETS_STORE" ] || exit 0
     CDPATH='' cd -- "$SECRETS_STORE" || exit 1
-    find -L . -name '.?*' -prune -o -type f -name '*.age' -print 2>/dev/null |
-        sed -e 's|^\./||' -e 's|\.age$||' |
-        LC_ALL=C sort
+    # find runs on its own, not as the head of a pipeline: POSIX sh has no
+    # pipefail, so piping it would report sort's status and a directory find
+    # could not read would come back as a silently short list. rekey builds
+    # its whole work list from here -- a short list there means entries keep
+    # a recipient the user believes they revoked.
+    found=$(find -L . -name '.?*' -prune -o -type f -name '*.age' -print) || {
+        printf 'secrets: cannot list %s in full\n' "$SECRETS_STORE" >&2
+        exit 1
+    }
+    [ -n "$found" ] || exit 0
+    printf '%s\n' "$found" | sed -e 's|^\./||' -e 's|\.age$||' | LC_ALL=C sort
 )
 
+# Interactive by default, as before. `rm -i` reads its confirmation from
+# stdin, so with stdin at EOF -- a script, cron, CI, xargs -- it declines and
+# still exits 0: the old code reported success having deleted nothing. Off a
+# terminal we now require -f rather than guess, and either way we verify the
+# file is actually gone before reporting success.
 _secrets_rm() (
+    force=0
+    if [ "${1-}" = "-f" ]; then force=1; shift; fi
+
     _secrets_name "${1-}" || exit $?
     f="$SECRETS_STORE/$1.age"
     if [ ! -e "$f" ]; then
         printf 'secrets: no such secret: %s\n' "$1" >&2
         exit 1
     fi
-    rm -i -- "$f" || exit $?
-    [ -e "$f" ] || _secrets_prune "$f"
+
+    if [ "$force" -eq 1 ]; then
+        rm -f -- "$f" || exit 1
+    elif [ -t 0 ]; then
+        rm -i -- "$f"
+        if [ -e "$f" ]; then exit 1; fi          # declined at the prompt
+    else
+        printf 'secrets: rm needs a terminal to confirm; use: secrets rm -f %s\n' \
+            "$1" >&2
+        exit 1
+    fi
+
+    if [ -e "$f" ]; then
+        printf 'secrets: could not remove %s\n' "$1" >&2
+        exit 1
+    fi
+    _secrets_prune "$f"
     exit 0
 )
 
@@ -446,7 +500,7 @@ _secrets_rename() (
 )
 
 _secrets_recipients() (
-    if [ -n "${1-}" ]; then
+    if [ "$#" -gt 0 ]; then
         _secrets_name "$1" || exit $?
         sub=$(_secrets_subdir "$1")
     else
@@ -470,8 +524,9 @@ _secrets_recipients() (
         "$keygen" -y "$idf"
         exit $?
     fi
-    printf 'secrets: no recipients under %s\n' "$SECRETS_STORE" >&2
-    exit 1
+    printf 'secrets: no recipients under %s and no identity at %s\n' \
+        "$SECRETS_STORE" "$SECRETS_IDENTITY" >&2
+    exit 3
 )
 
 # Re-encrypt every secret to the recipients that currently govern it. All-or-
@@ -506,7 +561,8 @@ _secrets_rekey() (
         [ -z "$sub" ] || mkdir -p "$stage/$sub" || exit 1
         # POSIX has no pipefail; funnel the producer's status through a file.
         { "$agebin" -d -i "$idf" "$SECRETS_STORE/$name.age" || echo fail > "$st"; } \
-            | _secrets_encrypt_to "$stage/$name.age" "$sub" "$idf"
+            | _secrets_encrypt_to "$stage/$name.age" "$sub" "$idf" \
+                  "$(_secrets_armor_of "$SECRETS_STORE/$name.age")"
         if [ -f "$st" ] || [ ! -s "$stage/$name.age" ]; then
             printf 'secrets: rekey failed on %s, nothing changed\n' "$name" >&2
             exit 1
@@ -519,14 +575,40 @@ _secrets_rekey() (
         exit 0
     fi
 
+    # Installing is the other half of all-or-nothing. Each original is moved
+    # into the staging tree before its replacement lands, so a failure part
+    # way through (ENOSPC, EACCES, EIO) can put every entry back rather than
+    # leaving the store split across two recipient sets.
+    mkdir -p "$stage/.orig" || exit 1
+    done_list="$stage/.done"
+    : > "$done_list" || exit 1
+    failed_at=''
     while IFS= read -r name; do
         [ -n "$name" ] || continue
+        sub=$(_secrets_subdir "$name")
+        if [ -n "$sub" ] && ! mkdir -p "$stage/.orig/$sub"; then
+            failed_at=$name; break
+        fi
+        if ! mv -f -- "$SECRETS_STORE/$name.age" "$stage/.orig/$name.age"; then
+            failed_at=$name; break
+        fi
         if ! chmod 600 "$stage/$name.age" ||
            ! mv -f -- "$stage/$name.age" "$SECRETS_STORE/$name.age"; then
-            printf 'secrets: failed to install %s\n' "$name" >&2
-            exit 1
+            mv -f -- "$stage/.orig/$name.age" "$SECRETS_STORE/$name.age" 2>/dev/null
+            failed_at=$name; break
         fi
+        printf '%s\n' "$name" >> "$done_list"
     done < "$list"
+
+    if [ -n "$failed_at" ]; then
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            mv -f -- "$stage/.orig/$name.age" "$SECRETS_STORE/$name.age" 2>/dev/null
+        done < "$done_list"
+        printf 'secrets: failed to install %s, rolled back, nothing changed\n' \
+            "$failed_at" >&2
+        exit 1
+    fi
     printf 'secrets: rekeyed %d secret(s)\n' "$n" >&2
 )
 
@@ -545,11 +627,15 @@ _secrets_migrate() (
     chmod 700 "$SECRETS_STORE" || exit 1
 
     n=0
-    for f in "$SECRETS_DIR"/*.age; do
-        [ -e "$f" ] || continue
+    # find, not a glob: see _secrets_legacy_guard.
+    find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null \
+        > "$SECRETS_DIR/.migrate.list" || exit 1
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
         mv -- "$f" "$SECRETS_STORE/${f##*/}" || exit 1
         n=$((n + 1))
-    done
+    done < "$SECRETS_DIR/.migrate.list"
+    rm -f "$SECRETS_DIR/.migrate.list"
 
     if [ -e "$SECRETS_DIR/identity.txt" ] && [ ! -e "$SECRETS_IDENTITY" ]; then
         mv -- "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" || exit 1
@@ -592,7 +678,7 @@ _secrets_complete() {
     # An escaped space reaches us as a backslash the stored name lacks.
     typed="$pfx${cur//\\/}"
 
-    [[ ${COMP_WORDS[1]} == @(enc|rename) && -z $typed ]] && COMPREPLY+=(-f)
+    [[ ${COMP_WORDS[1]} == @(enc|rename|rm) && -z $typed ]] && COMPREPLY+=(-f)
     # One name per line: names may contain spaces and shell metacharacters,
     # so `compgen -W` would word-split and expand them. Quote what goes back,
     # or bash inserts `with space` as two arguments.
@@ -613,8 +699,8 @@ _secrets() {
         return
     fi
     case "$words[2]" in
-        dec|rm|recipients)  compadd -- ${(f)"$(secrets ls 2>/dev/null)"} ;;
-        enc|rename)         compadd -- -f ${(f)"$(secrets ls 2>/dev/null)"} ;;
+        dec|recipients)     compadd -- ${(f)"$(secrets ls 2>/dev/null)"} ;;
+        enc|rename|rm)      compadd -- -f ${(f)"$(secrets ls 2>/dev/null)"} ;;
         completions)        compadd bash zsh fish ;;
     esac
 }
@@ -626,6 +712,7 @@ complete -c secrets -f
 complete -c secrets -n '__fish_use_subcommand' -a 'init enc dec ls rm rename recipients rekey migrate completions help'
 complete -c secrets -n '__fish_seen_subcommand_from dec rm enc rename recipients' -a '(secrets ls 2>/dev/null)'
 complete -c secrets -n '__fish_seen_subcommand_from enc rename' -s f -d 'overwrite existing secret'
+complete -c secrets -n '__fish_seen_subcommand_from rm' -s f -d 'delete without confirming'
 complete -c secrets -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'
 EOF
         ;;
@@ -644,12 +731,15 @@ usage: secrets <subcommand> [args]
   enc  [-f] NAME       encrypt stdin -> NAME.age  (-f overwrites)
   dec  NAME            decrypt to stdout, verbatim
   ls                   list stored names
-  rm   NAME            delete a secret
+  rm   [-f] NAME       delete a secret (-f skips the prompt)
   rename [-f] OLD NEW  rename a secret (-f overwrites)
   recipients [NAME]    show who can decrypt
   rekey                re-encrypt everything to current recipients
   migrate              convert a pre-0.2 flat store to the current layout
   completions SHELL    emit completions (bash | zsh | fish)
+
+exit: 0 ok  1 failed  2 usage/invalid name  3 no identity or recipients
+      4 store needs `secrets migrate`
 
 NAME may contain '/': `work/aws` is $SECRETS_STORE/work/aws.age.
 

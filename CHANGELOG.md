@@ -58,6 +58,36 @@ guarantees — the layout and the naming rules changed underneath them.
 
 ### Fixed
 
+- **`rekey` silently rekeyed only part of the store.** `secrets ls`, which
+  builds rekey's work list, ran `find` as the head of a pipeline; POSIX `sh`
+  has no `pipefail`, so a directory `find` could not read came back as a
+  quietly short list and rekey reported success. Entries kept a recipient the
+  user believed they had revoked. `ls` now fails loudly instead.
+- **The whole tool was broken under zsh.** Two `for f in "$DIR"/*.age` loops
+  are fatal errors under zsh's `NO_MATCH` rather than leaving the glob
+  literal, so every subcommand died on a store that did not exist yet.
+  Replaced with `find`. The test suite passes under zsh again, and CI now
+  also parses the library and both suites under dash, bash and zsh.
+- **`rekey`'s install pass is now genuinely all-or-nothing.** It was a bare
+  loop of `mv`s: a failure part way through left the store split across two
+  recipient sets, and the cleanup trap then deleted the remaining work. Each
+  original is now moved into the staging tree before its replacement lands,
+  so a failure rolls every entry back.
+- **`rekey` no longer converts a pago store's armored entries to binary.**
+  Armor is decided per entry from the file already on disk.
+- **`secrets rm` no longer silently does nothing.** `rm -i` reads its
+  confirmation from stdin and at EOF declines while still exiting 0, so an
+  unattended `secrets rm` reported success having deleted nothing. It now
+  refuses without a terminal and takes `-f`; either way it verifies the file
+  is gone.
+- `enc` no longer leaves an orphaned ciphertext temp file (invisible to
+  `secrets ls`) when it cannot install its result.
+- The unwrapped identity is removed if the command is interrupted at the
+  passphrase prompt; the caller's trap could not cover that window.
+- `secrets recipients` exits 3, like every other path, where it exited 1 for
+  the same "no recipients and no identity" condition; `secrets recipients ''`
+  validates the empty name instead of reporting the store root. Exit codes
+  are now documented in `secrets help` and the README.
 - `rename` across a recipients boundary could destroy the source and leave
   an empty secret behind. Encrypting the empty output of a failed `age -d`
   still produces a valid, non-empty age file, and POSIX `sh` has no

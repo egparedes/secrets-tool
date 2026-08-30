@@ -21,6 +21,24 @@ jobs:
           shellcheck --shell=sh tests/test-secrets.sh
           shellcheck --shell=sh tests/test-interop.sh
           shellcheck bin/secrets
+          # the completions are generated, so linting the library alone
+          # never sees them; check they at least parse in their own shell
+          sh bin/secrets completions bash | bash -n
+          sh bin/secrets completions zsh  | zsh -n
+
+  syntax:
+    # dash and zsh differ from bash in ways this library has been bitten by
+    # (zsh makes an unmatched glob fatal), so parse under each of them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -y -q dash zsh
+      - run: |
+          for sh in dash bash zsh; do
+            "$sh" -n lib/secrets-lib.sh
+            "$sh" -n tests/test-secrets.sh
+            "$sh" -n tests/test-interop.sh
+          done
 
   test:
     runs-on: ubuntu-latest

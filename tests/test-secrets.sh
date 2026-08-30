@@ -25,6 +25,7 @@ STORE="$SECRETS_DIR/store"
 ID="$SECRETS_DIR/identities"
 RCP="$STORE/.age-recipients"
 
+BINDIR=$(cd "$(dirname "$0")/../bin" && pwd)
 SECRETS_LIB=${SECRETS_LIB:-$(dirname "$0")/../lib/secrets-lib.sh}
 # shellcheck disable=SC1090  # path is computed
 . "$SECRETS_LIB"
@@ -115,7 +116,7 @@ echo "== name validation: everything a passage store can hold is accepted =="
 for t_n in 'x$(id)' 'a;b' 'mail@example.com' 'with space' 'a+b' 'Ünïcøde'; do
     printf 'ok-%s\n' "$t_n" | secrets enc "$t_n" >/dev/null 2>&1
     check "accepted and roundtrips: '$t_n'" "ok-$t_n" "$(secrets dec "$t_n" 2>/dev/null)"
-    yes | secrets rm "$t_n" >/dev/null 2>&1
+    secrets rm -f "$t_n" >/dev/null 2>&1
 done
 
 echo "== clobber protection =="
@@ -151,6 +152,33 @@ check "no identity temporaries after abort" "0" \
     "$(find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' 2>/dev/null | wc -l)"
 rm -f "$STORE/broken.age"
 
+echo "== rekey's install pass rolls back =="
+# Staging is only half of all-or-nothing; installing is the other half. Root
+# ignores directory permissions, so this can only be provoked as a normal
+# user -- which is what CI runs as.
+if [ "$(id -u)" -ne 0 ]; then
+    t_rb="$T/rollback"
+    ( SECRETS_DIR="$t_rb"; secrets init ) >/dev/null 2>&1
+    printf 'A\n' | ( SECRETS_DIR="$t_rb"; secrets enc a )
+    printf 'B\n' | ( SECRETS_DIR="$t_rb"; secrets enc d/b )
+    printf 'Z\n' | ( SECRETS_DIR="$t_rb"; secrets enc z )
+    "$KG" -y "$T/id2.txt" >> "$t_rb/store/.age-recipients"
+    chmod 500 "$t_rb/store/d"
+    ( SECRETS_DIR="$t_rb"; secrets rekey ) >/dev/null 2>&1
+    check "rekey fails when an entry cannot be installed" "1" "$?"
+    chmod 700 "$t_rb/store/d"
+    check "no entry was left rekeyed" "0" \
+        "$("$AGEBIN" -d -i "$T/id2.txt" "$t_rb/store/a.age" >/dev/null 2>&1; \
+           echo $? | grep -c '^0$')"
+    check "every entry still decrypts" "A B Z" \
+        "$( SECRETS_DIR="$t_rb"; printf '%s %s %s' "$(secrets dec a)" \
+            "$(secrets dec d/b)" "$(secrets dec z)" )"
+    check "no stage dir left after the rollback" "0" \
+        "$(find "$t_rb" -name '.rekey.*' | wc -l)"
+else
+    echo "  skip rekey install-rollback checks (running as root)"
+fi
+
 echo "== per-subtree .age-recipients (passage's walk) =="
 # proj/ gets the store's own recipients plus one extra key, so the subtree is
 # a genuinely different recipient set that the root identity can still read.
@@ -164,6 +192,26 @@ check "recipients walk falls back to the root" "$RCP" \
     "$(SECRETS_STORE=$STORE _secrets_recipients_for '')"
 check "walk from a deeper dir climbs to proj" "$STORE/proj/.age-recipients" \
     "$(SECRETS_STORE=$STORE _secrets_recipients_for proj/sub)"
+# The walk must stop at the store root. Without that boundary it climbs into
+# $SECRETS_DIR, then /tmp, then / -- so a .age-recipients anyone could drop in
+# a parent directory would silently become the encryption recipient set.
+printf '# planted\n' > "$SECRETS_DIR/.age-recipients"
+check "walk stops at the store root" "$RCP" \
+    "$(SECRETS_STORE=$STORE _secrets_recipients_for '')"
+check "walk stops at the root from a subdir too" "$STORE/proj/.age-recipients" \
+    "$(SECRETS_STORE=$STORE _secrets_recipients_for proj)"
+# The store root having its own .age-recipients stops the walk regardless, so
+# the boundary is only really exercised by a store that has none: plant one in
+# the parent and it must still not be found.
+t_empty="$T/emptystore"
+mkdir -p "$t_empty/store"
+printf '# planted in the parent\n' > "$t_empty/.age-recipients"
+check "a store with no recipients finds none, not its parent's" "" \
+    "$(SECRETS_STORE=$t_empty/store _secrets_recipients_for '')"
+mkdir -p "$t_empty/store/deep/er"
+check "nor from a subdirectory of it" "" \
+    "$(SECRETS_STORE=$t_empty/store _secrets_recipients_for deep/er)"
+rm -f "$SECRETS_DIR/.age-recipients"
 printf 'subtree-value\n' | secrets enc proj/key
 check "subtree entry readable by the subtree-only key" "subtree-value" \
     "$("$AGEBIN" -d -i "$T/id3.txt" "$STORE/proj/key.age")"
@@ -198,15 +246,61 @@ check "no rename temporaries left" "0" \
 rm -f "$STORE/proj/broken.age"
 
 rm -rf "$STORE/proj"
-yes | secrets rm movedout >/dev/null 2>&1
+secrets rm -f movedout >/dev/null 2>&1
 
 echo "== rm prunes the directories it empties =="
 printf 'x\n' | secrets enc p/q/r
-yes | secrets rm p/q/r >/dev/null 2>&1
+secrets rm -f p/q/r >/dev/null 2>&1
 check "p/q/r gone"    "0" "$(secrets ls | grep -cx 'p/q/r')"
 check "empty p/q gone" "0" "$([ -d "$STORE/p/q" ] && echo 1 || echo 0)"
 check "empty p gone"   "0" "$([ -d "$STORE/p" ] && echo 1 || echo 0)"
 check "store itself survives" "1" "$([ -d "$STORE" ] && echo 1 || echo 0)"
+
+echo "== ls must not turn a find failure into a short list =="
+# rekey builds its whole work list from `secrets ls`. A pipeline would report
+# sort's status, so a directory find cannot walk would come back as a quietly
+# short list -- and rekey would report success while leaving entries holding
+# a recipient the user believes they revoked. A symlink cycle makes find fail
+# for any user, root included.
+t_before_ls=$(secrets ls | wc -l)
+ln -s cycleb "$STORE/cyclea"
+ln -s cyclea "$STORE/cycleb"
+secrets ls >/dev/null 2>&1
+check "ls reports a find failure" "1" "$?"
+secrets ls 2>&1 >/dev/null | grep -q 'cannot list'
+check "and says so, rather than printing a short list" "0" "$?"
+secrets rekey >/dev/null 2>&1
+check "rekey refuses on an unlistable store" "1" "$?"
+check "rekey changed nothing" "$t_before" "$(secrets dec github)"
+check "no stage dir left after the refusal" "0" \
+    "$(find "$SECRETS_DIR" -name '.rekey.*' 2>/dev/null | wc -l)"
+rm -f "$STORE/cyclea" "$STORE/cycleb"
+check "ls is whole again once the cycle is gone" "$t_before_ls" "$(secrets ls | wc -l)"
+
+echo "== rekey keeps each entry in the format it found it in =="
+# pago writes armored entries; rekeying its store must not silently rewrite
+# every file to binary, which would be a whole-store diff in the git history
+# the README encourages.
+printf 'ARM\n' | SECRETS_ARMOR=1 secrets enc armorkeep
+printf 'BIN\n' | secrets enc binkeep
+secrets rekey >/dev/null 2>&1
+check "rekey rc with mixed formats" "0" "$?"
+check "the armored entry stays armored" "1" \
+    "$(head -n 1 "$STORE/armorkeep.age" | grep -c 'BEGIN AGE ENCRYPTED FILE')"
+check "the binary entry stays binary" "1" \
+    "$(head -n 1 "$STORE/binkeep.age" | grep -c 'age-encryption.org')"
+check "armored entry still decrypts" "ARM" "$(secrets dec armorkeep)"
+check "binary entry still decrypts" "BIN" "$(secrets dec binkeep)"
+secrets rm -f armorkeep >/dev/null 2>&1
+secrets rm -f binkeep >/dev/null 2>&1
+
+echo "== enc leaves no ciphertext behind when it cannot install the result =="
+# A name long enough to make the final mv fail with ENAMETOOLONG: the
+# ciphertext temp is hidden from `secrets ls`, so a leak here is invisible.
+t_long=$(awk 'BEGIN{ s=""; while (length(s) < 300) s = s "a"; print s }')
+printf 'v\n' | secrets enc "$t_long" >/dev/null 2>&1
+check "enc fails on an unusable name" "1" "$?"
+check "and leaves no temp ciphertext" "0" "$(find "$STORE" -name '.tmp.*' | wc -l)"
 
 echo "== armor mode =="
 printf 'ARMORED=yes\n' | SECRETS_ARMOR=1 secrets enc armored
@@ -216,8 +310,24 @@ check "armor decrypts" "ARMORED=yes" "$(secrets dec armored)"
 echo "== ls / rm / recipients / help / dispatcher =="
 check "ls finds github" "1" "$(secrets ls | grep -cx github)"
 check "recipients count" "2" "$(secrets recipients | grep -c '^age1')"
-yes | secrets rm dup >/dev/null 2>&1
+secrets rm -f dup >/dev/null 2>&1
 check "rm removed it" "0" "$(secrets ls | grep -cx dup)"
+# `rm -i` reads its confirmation from stdin: at EOF it declines and still
+# exits 0, so an unattended `secrets rm` used to report success having
+# deleted nothing. Off a terminal it must refuse instead of guessing.
+printf 'keepme\n' | secrets enc keepme
+secrets rm keepme </dev/null >/dev/null 2>&1
+check "rm without a terminal refuses" "1" "$?"
+check "and the secret survives" "1" "$(secrets ls | grep -cx keepme)"
+secrets rm keepme </dev/null 2>&1 | grep -q 'secrets rm -f'
+check "its message names the -f fix" "0" "$?"
+secrets rm -f keepme
+check "rm -f rc" "0" "$?"
+check "rm -f removed it" "0" "$(secrets ls | grep -cx keepme)"
+secrets rm -f nosuch >/dev/null 2>&1
+check "rm -f of a missing secret still fails" "1" "$?"
+secrets rm -f '../escape' >/dev/null 2>&1
+check "rm -f still validates the name" "2" "$?"
 secrets help >/dev/null; check "help rc" "0" "$?"
 secrets bogus >/dev/null 2>&1; check "unknown subcommand rc" "2" "$?"
 
@@ -263,8 +373,8 @@ EOF
 check "reads a flat passage entry"   "written-by-passage" "$(secrets dec from-passage)"
 check "reads a nested passage entry" "nested-by-passage"  "$(secrets dec nested/by/passage/entry)"
 check "ls sees the passage entries" "1" "$(secrets ls | grep -cx 'nested/by/passage/entry')"
-yes | secrets rm from-passage >/dev/null 2>&1
-yes | secrets rm nested/by/passage/entry >/dev/null 2>&1
+secrets rm -f from-passage >/dev/null 2>&1
+secrets rm -f nested/by/passage/entry >/dev/null 2>&1
 
 echo "== interop: a passage store with no .age-recipients =="
 # passage falls back to encrypting to the identities file's own public keys.
@@ -308,6 +418,29 @@ if command -v script >/dev/null 2>&1 &&
 else
     echo "  skip pago encrypted-identities checks (no script(1) pty available)"
 fi
+
+echo "== an unmatched glob must not be fatal (zsh NO_MATCH) =="
+# Every subcommand runs the legacy guard, which used to glob $SECRETS_DIR/*.age.
+t_fresh="$T/fresh"
+( SECRETS_DIR="$t_fresh"; secrets init ) >/dev/null 2>&1
+check "init works on a store that does not exist yet" "0" "$?"
+check "and it really created the store" "1" \
+    "$([ -d "$t_fresh/store" ] && [ -f "$t_fresh/identities" ] && echo 1)"
+( SECRETS_DIR="$t_fresh"; secrets ls ) >/dev/null 2>&1
+check "ls on an empty store" "0" "$?"
+# a legacy store holding the key files but no blobs at all
+t_part="$T/partial"
+mkdir -p "$t_part"
+cp "$ID" "$t_part/identity.txt"
+"$KG" -y "$t_part/identity.txt" > "$t_part/recipients.txt"
+( SECRETS_DIR="$t_part"; secrets ls ) >/dev/null 2>&1
+check "a blobless legacy store is still refused" "4" "$?"
+( SECRETS_DIR="$t_part"; secrets migrate ) >/dev/null 2>&1
+check "migrating a blobless legacy store" "0" "$?"
+check "its identity moved" "1" "$([ -f "$t_part/identities" ] && echo 1)"
+check "its recipients moved" "1" "$([ -f "$t_part/store/.age-recipients" ] && echo 1)"
+check "no migrate scratch file left" "0" \
+    "$(find "$t_part" -name '.migrate.list' | wc -l)"
 
 echo "== migrating a pre-0.2 flat store =="
 L="$T/legacy"
@@ -360,11 +493,11 @@ _secrets_complete
 printf '%s\n' "${COMPREPLY[*]}"
 PROBE
 # The completion shells out to `secrets ls`, but this suite drives a sourced
-# shell function -- so the probe needs the real CLI on its PATH.
-t_probe() {
-    CB="$T/c.bash" PATH="$(cd "$(dirname "$0")/../bin" && pwd):$PATH" \
-        bash "$T/probe.bash" "$@"
-}
+# shell function -- so the probe needs the real CLI on its PATH. $BINDIR is
+# resolved at top level: inside a function zsh sets $0 to the function's own
+# name, so computing it here would silently yield the wrong directory and
+# every probe would come back empty (and two of them would pass vacuously).
+t_probe() { CB="$T/c.bash" PATH="$BINDIR:$PATH" bash "$T/probe.bash" "$@"; }
 
 for t_n in 'zz/nested-one' 'zz/nested-two' 'zz:colon' 'zz space'; do
     printf 'v\n' | secrets enc "$t_n"
@@ -393,7 +526,7 @@ check "-f does not corrupt the colon prefix" "colon" \
 check "completes names after -f" "zz/nested-one zz/nested-two" \
     "$(t_probe secrets enc -f 'zz/n')"
 for t_n in 'zz/nested-one' 'zz/nested-two' 'zz:colon' 'zz space'; do
-    yes | secrets rm "$t_n" >/dev/null 2>&1
+    secrets rm -f "$t_n" >/dev/null 2>&1
 done
 
 echo "== cli wrapper =="
@@ -554,7 +687,7 @@ fi
 
 echo "== no variable leakage into sourcing shell (subshell bodies) =="
 for var in agebin keygen out tmp in name f n stage st pub force src dst \
-           bin dir sub idf rf list legacy; do
+           bin dir sub idf rf list legacy found armor done_list failed_at; do
     eval "val=\${$var-__UNSET__}"
     [ "$val" = "__UNSET__" ] && ok "no leak: \$$var" || bad "leaked: \$$var=[$val]"
 done

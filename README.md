@@ -35,8 +35,8 @@ $ export GITHUB_TOKEN="$(secrets dec github)"
   three at it, or walk away and use plain `age` — the files are ordinary
   age ciphertext in a directory tree.
 - **Portable.** Strictly POSIX `sh` (sole exception: `mktemp`, which is
-  universal in practice). Tested under dash, bash, and zsh, against both
-  age v1.3.1 and rage v0.11.1. One store, either binary.
+  universal in practice). CI runs the suite under dash, bash and zsh
+  against both age and rage. One store, either binary.
 - **Multi-machine.** Append another machine's public key to
   `.age-recipients`, run `secrets rekey`, sync the directory (ciphertext
   only — safe for git/rsync).
@@ -87,7 +87,7 @@ secrets init                 create the store, generate an identity
 secrets enc  [-f] NAME       encrypt stdin -> NAME.age  (-f overwrites)
 secrets dec  NAME            decrypt to stdout, verbatim
 secrets ls                   list stored names
-secrets rm   NAME            delete a secret
+secrets rm   [-f] NAME       delete a secret (-f skips the prompt)
 secrets rename [-f] OLD NEW  rename a secret
 secrets recipients [NAME]    show who can decrypt
 secrets rekey                re-encrypt everything to current recipients
@@ -98,6 +98,10 @@ secrets completions SHELL    emit completions (bash | zsh | fish)
 Names are hierarchical, as in passage and pago: `work/aws` is
 `$SECRETS_STORE/work/aws.age`, `secrets ls` recurses, and `secrets rm`
 cleans up the directories it empties.
+
+`secrets rm` confirms before deleting. Because that confirmation is read
+from stdin, off a terminal it refuses rather than guessing — pass `-f` in
+scripts and cron.
 
 ```sh
 printf 'AKIA...\n' | secrets enc work/aws
@@ -183,6 +187,16 @@ secrets migrate
 
 Nothing is re-encrypted, so it is fast and your identity is unchanged.
 
+### Exit codes
+
+| Code | Meaning                                                  |
+| ---- | -------------------------------------------------------- |
+| `0`  | success                                                   |
+| `1`  | the operation failed                                      |
+| `2`  | usage error, or an invalid secret name                    |
+| `3`  | no usable identity or recipients                          |
+| `4`  | the store is a pre-0.2 layout; run `secrets migrate`      |
+
 ### Configuration
 
 | Variable             | Default                          | Meaning                          |
@@ -262,16 +276,24 @@ SECRETS_AGE=rage dash tests/test-secrets.sh    # pin backend and shell
 make test-interop                              # against real passage/pago
 ```
 
-The main suite (212 checks on a typical machine — two are skipped if a
-system-wide library is already installed, one if `zsh` isn't present,
-eleven if `make` isn't present, and five if there is no `script`(1) to hand
-age a pty) covers roundtrips, binary payloads, hierarchical names, the
-`.age-recipients` walk, tamper rejection, path-escape attempts, clobber
-protection, write-only operation, atomic rekey, armor mode, encrypted
-identities, migration from a pre-0.2 store, completions, variable-leak
-detection, bash completion driven the way readline drives it, CLI library
-discovery, and install staging via `make install`/`make uninstall`. CI runs it across {dash, bash, zsh} × {age,
-rage}, plus the interop suite against pinned passage and pago releases.
+`make test-interop` exits non-zero if neither passage nor pago is on your
+`PATH` — a run that verified nothing is not a pass.
+
+The main suite is 252 checks as an ordinary user, 248 as root. Blocks skip
+themselves when they cannot run: four need a non-root user (rekey's
+install-rollback check turns on a directory permission root ignores), five
+need `script`(1) to hand age a pty, eleven need `make`, two need no
+system-wide library installed, and one needs `zsh`.
+
+It covers roundtrips, binary payloads, hierarchical names, the
+`.age-recipients` walk and its store-root boundary, tamper rejection,
+path-escape attempts, clobber protection, write-only operation, rekey's
+atomicity across both its staging and install passes, armor preservation,
+armor mode, encrypted identities, migration from a pre-0.2 store, shell
+completions driven the way readline drives them, variable-leak detection,
+CLI library discovery, and install staging via `make install`/`make
+uninstall`. CI runs it across {dash, bash, zsh} × {age, rage}, plus the
+interop suite against pinned passage and pago releases.
 
 ## Threat model
 
