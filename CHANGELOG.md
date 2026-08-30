@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.2.0] - unreleased
+
+The store is now byte-for-byte a
+[passage](https://github.com/FiloSottile/passage) /
+[pago](https://github.com/dbohdan/pago) store: all three tools can drive the
+same directory. Same feature set as 0.1.0, same subcommands, same
+guarantees — the layout and the naming rules changed underneath them.
+
+### Changed
+
+- **Store layout.** Entries live in `$SECRETS_DIR/store/`, the identity is
+  `$SECRETS_DIR/identities`, and recipients are
+  `$SECRETS_DIR/store/.age-recipients` — passage's `~/.passage` and pago's
+  `~/.local/share/pago` exactly. `SECRETS_DIR=~/.passage secrets ls` is all
+  it takes to work in someone else's store.
+- **Hierarchical names.** `work/aws` is `store/work/aws.age`. `ls` recurses
+  and sorts, `enc` and `rename` create the directories they need, and `rm`
+  and `rename` prune the ones they empty.
+- **Name validation** now rejects what could escape the store or collide
+  with its dot-files (`..`, absolute or trailing `/`, empty or dot-leading
+  components, control characters) and accepts everything else a passage
+  store can hold, including spaces, `@`, `+` and shell metacharacters.
+  Names are only ever quoted path arguments, never shell input.
+- **Recipients are resolved per entry**, by passage's rule: the nearest
+  `.age-recipients` at or above the entry's directory wins, falling back to
+  the identities file when the store has none. `rekey` honours the walk;
+  `rename` re-encrypts an entry that crosses a boundary and otherwise still
+  moves it without needing the private key. `SECRETS_RECIPIENTS` now pins
+  one file for the whole store, as `PASSAGE_RECIPIENTS_FILE` does.
+- **Paths are derived per call**, not when the library is sourced, so
+  changing `SECRETS_DIR` in a shell that sourced the library moves the whole
+  store. Sourcing now sets no variables at all.
+- `secrets recipients` takes an optional `NAME` and reports the recipients
+  that actually govern it; with no `.age-recipients` anywhere it derives the
+  public keys from the identity, which is what encryption would use.
+- The bash completion no longer expands stored names through `compgen -W`,
+  now that names may contain metacharacters.
+
+### Added
+
+- **`secrets migrate`**, a one-shot in-place conversion of a pre-0.2 flat
+  store. Until it is run, `secrets` refuses to operate on such a store
+  (exit code 4) instead of starting an empty one beside it. Nothing is
+  re-encrypted.
+- **Encrypted identities.** pago keeps its identities file under a master
+  password; that is detected from the file's header and unwrapped with age
+  into a mode-600 temporary file, preferring a tmpfs such as `/dev/shm`,
+  removed when the command returns. Encrypting never needs it.
+- **`tests/test-interop.sh`** (`make test-interop`), which drives one store
+  with `secrets` and with the real `passage` and `pago` in both directions.
+  A new CI job runs it against pinned releases of both.
+
+### Fixed
+
+- `rename` across a recipients boundary could destroy the source and leave
+  an empty secret behind. Encrypting the empty output of a failed `age -d`
+  still produces a valid, non-empty age file, and POSIX `sh` has no
+  `pipefail` to notice, so a failed decrypt read as a clean re-encryption.
+  The decrypt's status is now checked directly, as `rekey` already did.
+- `rekey` and `rename` now drop their staging trees and any unwrapped
+  identity on every exit path, via one `EXIT` trap instead of per-branch
+  cleanup that some error paths missed.
+
 ## [0.1.0] - unreleased
 
 Initial release.

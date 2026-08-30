@@ -1,6 +1,7 @@
 #!/bin/sh
 # Test suite for secrets-lib.sh. Parameterized:
 # shellcheck disable=SC2015,SC2016,SC2154  # ok/bad never fail; literal $(id) intentional; val assigned via eval
+# shellcheck disable=SC2030,SC2031  # scoping SECRETS_DIR to a subshell is the point of those checks
 #   TEST_SHELL   sh interpreter to run the assertions under (default: sh)
 #   SECRETS_AGE  backend to pin (default: autodetect)
 # The suite itself is POSIX sh and re-execs nothing; the caller picks the shell.
@@ -14,27 +15,40 @@ check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want [$2] got [$3])"; 
 
 T=$(mktemp -d /tmp/secrets-test.XXXXXX)
 trap 'rm -rf "$T"' EXIT INT TERM
-SECRETS_DIR="$T/store"
-SECRETS_IDENTITY="$SECRETS_DIR/identity.txt"
-SECRETS_RECIPIENTS="$SECRETS_DIR/recipients.txt"
-export SECRETS_DIR SECRETS_IDENTITY SECRETS_RECIPIENTS
+
+# Only SECRETS_DIR is exported: the point of the passage/pago layout is that
+# everything else falls out of it. The uppercase names below are the suite's
+# own handles on those derived paths.
+SECRETS_DIR="$T/secrets"
+export SECRETS_DIR
+STORE="$SECRETS_DIR/store"
+ID="$SECRETS_DIR/identities"
+RCP="$STORE/.age-recipients"
 
 SECRETS_LIB=${SECRETS_LIB:-$(dirname "$0")/../lib/secrets-lib.sh}
 # shellcheck disable=SC1090  # path is computed
 . "$SECRETS_LIB"
 
 printf 'backend: %s\n' "$(_secrets_age)"
+AGEBIN=$(_secrets_age)
+KG=$(_secrets_keygen)
 
-echo "== init =="
+echo "== init: passage/pago layout =="
 secrets init 2>/dev/null
-check "store dir mode 700"   "700" "$(stat -c %a "$SECRETS_DIR")"
-check "identity mode 600"    "600" "$(stat -c %a "$SECRETS_IDENTITY")"
-check "recipients has 1 key" "1"   "$(grep -c '^age1' "$SECRETS_RECIPIENTS")"
+check "base dir mode 700"    "700" "$(stat -c %a "$SECRETS_DIR")"
+check "store dir mode 700"   "700" "$(stat -c %a "$STORE")"
+check "identities mode 600"  "600" "$(stat -c %a "$ID")"
+check "identities is at \$SECRETS_DIR/identities" "1" "$([ -f "$SECRETS_DIR/identities" ] && echo 1)"
+check "recipients is store/.age-recipients"       "1" "$([ -f "$RCP" ] && echo 1)"
+check "recipients has 1 key" "1"   "$(grep -c '^age1' "$RCP")"
+check "no legacy identity.txt"   "" "$(ls "$SECRETS_DIR"/identity.txt 2>/dev/null)"
+check "no legacy recipients.txt" "" "$(ls "$SECRETS_DIR"/recipients.txt 2>/dev/null)"
 secrets init >/dev/null 2>&1; check "init refuses to clobber" "1" "$?"
 
 echo "== roundtrip =="
 printf 'ghp_abc123\n' | secrets enc github
 check "simple roundtrip" "ghp_abc123" "$(secrets dec github)"
+check "blob lands in store/" "1" "$([ -f "$STORE/github.age" ] && echo 1)"
 
 echo "== format-agnostic: dec is verbatim, no parsing =="
 printf 'eyJhbGci.eyJzdWIi.SflKxwRJ==\n' | secrets enc jwt
@@ -60,23 +74,48 @@ secrets enc binary < "$T/bin.dat"
 secrets dec binary > "$T/bin.out"
 if cmp -s "$T/bin.dat" "$T/bin.out"; then ok "4KiB binary byte-identical"; else bad "binary roundtrip"; fi
 
+echo "== hierarchical names (passage/pago style) =="
+printf 'AKIA-nested\n' | secrets enc work/aws
+check "nested roundtrip" "AKIA-nested" "$(secrets dec work/aws)"
+check "nested file path" "1" "$([ -f "$STORE/work/aws.age" ] && echo 1)"
+check "nested dir mode 700" "700" "$(stat -c %a "$STORE/work")"
+printf 'deep\n' | secrets enc a/b/c/d
+check "3-level roundtrip" "deep" "$(secrets dec a/b/c/d)"
+check "ls shows nested name" "1" "$(secrets ls | grep -cx 'work/aws')"
+check "ls shows deep name"   "1" "$(secrets ls | grep -cx 'a/b/c/d')"
+check "ls hides .age-recipients" "0" "$(secrets ls | grep -c 'age-recipients')"
+check "ls is sorted" "$(secrets ls | LC_ALL=C sort)" "$(secrets ls)"
+mkdir -p "$STORE/.hidden" && printf 'x\n' > "$STORE/.hidden/y.age"
+check "ls prunes dot-directories" "0" "$(secrets ls | grep -c hidden)"
+rm -rf "$STORE/.hidden"
+
 echo "== exit status propagation =="
 v=$(secrets dec nonexistent 2>/dev/null); check "missing secret rc" "1" "$?"
 check "missing secret empty" "" "$v"
 secrets dec github >/dev/null 2>&1; check "good decrypt rc" "0" "$?"
 
 echo "== integrity =="
-cp "$SECRETS_DIR/github.age" "$T/t.age"
-printf 'X' | dd of="$SECRETS_DIR/github.age" bs=1 seek=250 conv=notrunc status=none
+cp "$STORE/github.age" "$T/t.age"
+printf 'X' | dd of="$STORE/github.age" bs=1 seek=250 conv=notrunc status=none
 secrets dec github >/dev/null 2>&1
 rc=$?
 [ "$rc" -ne 0 ] && ok "tampered blob rejected (rc=$rc)" || bad "tampered blob accepted"
-cp "$T/t.age" "$SECRETS_DIR/github.age"
+cp "$T/t.age" "$STORE/github.age"
 
-echo "== name validation =="
-for t_n in "../../etc/passwd" "" "a/b" ".hidden" 'x$(id)' "a;b"; do
+echo "== name validation: escapes and dot-components rejected =="
+for t_n in "../../etc/passwd" "" ".hidden" ".." "a/../b" "a/./b" "a/.git/b" \
+           "/abs" "a/" "a//b" "$(printf 'ctrl\tchar')"; do
     printf 'x\n' | secrets enc "$t_n" >/dev/null 2>&1
     [ "$?" = "2" ] && ok "rejected: '$t_n'" || bad "accepted: '$t_n'"
+done
+
+echo "== name validation: everything a passage store can hold is accepted =="
+# passage entry names are free-form; they only ever reach other programs as
+# quoted path arguments, so metacharacters are data, not code.
+for t_n in 'x$(id)' 'a;b' 'mail@example.com' 'with space' 'a+b' 'Ünïcøde'; do
+    printf 'ok-%s\n' "$t_n" | secrets enc "$t_n" >/dev/null 2>&1
+    check "accepted and roundtrips: '$t_n'" "ok-$t_n" "$(secrets dec "$t_n" 2>/dev/null)"
+    yes | secrets rm "$t_n" >/dev/null 2>&1
 done
 
 echo "== clobber protection =="
@@ -86,33 +125,92 @@ check "original intact" "v1" "$(secrets dec dup)"
 printf 'v2\n' | secrets enc -f dup; check "-f overwrites" "v2" "$(secrets dec dup)"
 
 echo "== asymmetric: encrypt without the private key =="
-mv "$SECRETS_IDENTITY" "$T/id.bak"
+mv "$ID" "$T/id.bak"
 printf 'WRITE_ONLY=yes\n' | secrets enc writeonly; check "enc with no identity" "0" "$?"
 secrets dec writeonly >/dev/null 2>&1;             check "dec with no identity" "3" "$?"
-mv "$T/id.bak" "$SECRETS_IDENTITY"
+mv "$T/id.bak" "$ID"
 check "readable once identity back" "WRITE_ONLY=yes" "$(secrets dec writeonly)"
 
 echo "== rekey to a second recipient =="
-KG=$(_secrets_keygen)
 "$KG" -o "$T/id2.txt" 2>/dev/null
-"$KG" -y "$T/id2.txt" >> "$SECRETS_RECIPIENTS"
+"$KG" -y "$T/id2.txt" >> "$RCP"
 t_before=$(secrets dec github)
 secrets rekey 2>/dev/null; check "rekey rc" "0" "$?"
 check "old identity still works" "$t_before" "$(secrets dec github)"
-AGEBIN=$(_secrets_age)
-check "new identity works" "$t_before" "$("$AGEBIN" -d -i "$T/id2.txt" "$SECRETS_DIR/github.age")"
+check "new identity works" "$t_before" "$("$AGEBIN" -d -i "$T/id2.txt" "$STORE/github.age")"
+check "rekey covers nested entries" "AKIA-nested" \
+    "$("$AGEBIN" -d -i "$T/id2.txt" "$STORE/work/aws.age")"
 check "no stage dirs left" "0" "$(find "$SECRETS_DIR" -name '.rekey.*' | wc -l)"
 
 echo "== rekey is all-or-nothing =="
-printf 'corrupt-me\n' > "$SECRETS_DIR/broken.age"
+printf 'corrupt-me\n' > "$STORE/broken.age"
 secrets rekey >/dev/null 2>&1; check "rekey aborts on bad blob" "1" "$?"
 check "github untouched after abort" "$t_before" "$(secrets dec github)"
 check "no stage dir after abort" "0" "$(find "$SECRETS_DIR" -name '.rekey.*' | wc -l)"
-rm -f "$SECRETS_DIR/broken.age"
+check "no identity temporaries after abort" "0" \
+    "$(find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' 2>/dev/null | wc -l)"
+rm -f "$STORE/broken.age"
+
+echo "== per-subtree .age-recipients (passage's walk) =="
+# proj/ gets the store's own recipients plus one extra key, so the subtree is
+# a genuinely different recipient set that the root identity can still read.
+"$KG" -o "$T/id3.txt" 2>/dev/null
+mkdir -p "$STORE/proj"
+cat "$RCP" > "$STORE/proj/.age-recipients"
+"$KG" -y "$T/id3.txt" >> "$STORE/proj/.age-recipients"
+check "recipients walk finds the nearest file" "$STORE/proj/.age-recipients" \
+    "$(SECRETS_STORE=$STORE _secrets_recipients_for proj)"
+check "recipients walk falls back to the root" "$RCP" \
+    "$(SECRETS_STORE=$STORE _secrets_recipients_for '')"
+check "walk from a deeper dir climbs to proj" "$STORE/proj/.age-recipients" \
+    "$(SECRETS_STORE=$STORE _secrets_recipients_for proj/sub)"
+printf 'subtree-value\n' | secrets enc proj/key
+check "subtree entry readable by the subtree-only key" "subtree-value" \
+    "$("$AGEBIN" -d -i "$T/id3.txt" "$STORE/proj/key.age")"
+check "subtree entry readable by the store identity" "subtree-value" "$(secrets dec proj/key)"
+check "recipients NAME reports the subtree file" \
+    "$(cat "$STORE/proj/.age-recipients")" "$(secrets recipients proj/key)"
+check "recipients with no arg reports the root file" \
+    "$(cat "$RCP")" "$(secrets recipients)"
+
+echo "== rename re-encrypts across a recipients boundary =="
+secrets rename proj/key movedout
+check "rename out of the subtree rc" "0" "$?"
+check "moved entry readable with the store identity" "subtree-value" "$(secrets dec movedout)"
+"$AGEBIN" -d -i "$T/id3.txt" "$STORE/movedout.age" >/dev/null 2>&1
+check "moved entry no longer readable by the subtree-only key" "1" "$?"
+check "source entry gone" "0" "$(secrets ls | grep -cx 'proj/key')"
+# proj/ is not pruned: it still holds the .age-recipients that governs it.
+check "subtree kept while it still holds .age-recipients" "1" \
+    "$([ -f "$STORE/proj/.age-recipients" ] && echo 1 || echo 0)"
+
+# A failed decrypt must not read as a clean re-encryption: encrypting the
+# empty output of a failed `age -d` still yields a valid, non-empty age file,
+# and POSIX sh has no pipefail to notice. Getting this wrong destroys the
+# source and leaves an empty secret in its place.
+printf 'not-an-age-file\n' > "$STORE/proj/broken.age"
+secrets rename proj/broken rescued >/dev/null 2>&1
+check "rename of an undecryptable entry fails" "1" "$?"
+check "its source survives" "1" "$([ -f "$STORE/proj/broken.age" ] && echo 1 || echo 0)"
+check "no empty destination left" "0" "$([ -e "$STORE/rescued.age" ] && echo 1 || echo 0)"
+check "no rename temporaries left" "0" \
+    "$(find "$STORE" \( -name '.tmp.*' -o -name '.st.*' \) | wc -l)"
+rm -f "$STORE/proj/broken.age"
+
+rm -rf "$STORE/proj"
+yes | secrets rm movedout >/dev/null 2>&1
+
+echo "== rm prunes the directories it empties =="
+printf 'x\n' | secrets enc p/q/r
+yes | secrets rm p/q/r >/dev/null 2>&1
+check "p/q/r gone"    "0" "$(secrets ls | grep -cx 'p/q/r')"
+check "empty p/q gone" "0" "$([ -d "$STORE/p/q" ] && echo 1 || echo 0)"
+check "empty p gone"   "0" "$([ -d "$STORE/p" ] && echo 1 || echo 0)"
+check "store itself survives" "1" "$([ -d "$STORE" ] && echo 1 || echo 0)"
 
 echo "== armor mode =="
 printf 'ARMORED=yes\n' | SECRETS_ARMOR=1 secrets enc armored
-check "armor header" "1" "$(head -1 "$SECRETS_DIR/armored.age" | grep -c 'BEGIN AGE ENCRYPTED FILE')"
+check "armor header" "1" "$(head -1 "$STORE/armored.age" | grep -c 'BEGIN AGE ENCRYPTED FILE')"
 check "armor decrypts" "ARMORED=yes" "$(secrets dec armored)"
 
 echo "== ls / rm / recipients / help / dispatcher =="
@@ -136,7 +234,102 @@ secrets rename -f newname taken; check "rename -f rc" "0" "$?"
 check "rename -f overwrote" "moved" "$(secrets dec taken)"
 secrets rename taken taken >/dev/null 2>&1; check "self-rename refused" "1" "$?"
 secrets rename '../x' ok2 >/dev/null 2>&1; check "bad OLD rejected" "2" "$?"
-secrets rename taken 'a/b' >/dev/null 2>&1; check "bad NEW rejected" "2" "$?"
+secrets rename taken '.hidden' >/dev/null 2>&1; check "bad NEW rejected" "2" "$?"
+secrets rename taken 'deep/dest'; check "rename into a new subdir rc" "0" "$?"
+check "renamed into subdir decrypts" "moved" "$(secrets dec deep/dest)"
+secrets rename deep/dest taken; check "rename back out rc" "0" "$?"
+check "subdir pruned after moving out" "0" "$([ -d "$STORE/deep" ] && echo 1 || echo 0)"
+
+# ── interoperability ─────────────────────────────────────────────────────────
+# passage and pago are not installed in CI, so drive their exact file layout
+# and age invocations directly. That is the whole contract: same paths, same
+# .age-recipients semantics, plain age ciphertext.
+
+echo "== interop: a store secrets wrote is readable the passage way =="
+# passage: $PASSAGE_DIR/<name>.age, decrypted with -i $PASSAGE_IDENTITIES_FILE
+check "passage-style read of a flat entry" "ghp_abc123" \
+    "$("$AGEBIN" -d -i "$ID" "$STORE/github.age")"
+check "passage-style read of a nested entry" "AKIA-nested" \
+    "$("$AGEBIN" -d -i "$ID" "$STORE/work/aws.age")"
+
+echo "== interop: secrets reads a store written the passage way =="
+"$AGEBIN" -e -R "$RCP" -o "$STORE/from-passage.age" <<'EOF'
+written-by-passage
+EOF
+mkdir -p "$STORE/nested/by/passage"
+"$AGEBIN" -e -R "$RCP" -o "$STORE/nested/by/passage/entry.age" <<'EOF'
+nested-by-passage
+EOF
+check "reads a flat passage entry"   "written-by-passage" "$(secrets dec from-passage)"
+check "reads a nested passage entry" "nested-by-passage"  "$(secrets dec nested/by/passage/entry)"
+check "ls sees the passage entries" "1" "$(secrets ls | grep -cx 'nested/by/passage/entry')"
+yes | secrets rm from-passage >/dev/null 2>&1
+yes | secrets rm nested/by/passage/entry >/dev/null 2>&1
+
+echo "== interop: a passage store with no .age-recipients =="
+# passage falls back to encrypting to the identities file's own public keys.
+P="$T/passage"
+mkdir -p "$P/store"
+"$KG" -o "$P/identities" 2>/dev/null
+check "no recipients file present" "" \
+    "$(SECRETS_STORE=$P/store _secrets_recipients_for '')"
+printf 'fallback\n' | ( SECRETS_DIR="$P"; secrets enc fb )
+check "enc falls back to the identities file" "0" "$?"
+check "fallback entry decrypts with age -i" "fallback" \
+    "$("$AGEBIN" -d -i "$P/identities" "$P/store/fb.age")"
+check "SECRETS_DIR alone reaches a passage store" "fallback" \
+    "$( SECRETS_DIR="$P"; secrets dec fb )"
+check "recipients derives keys from the identity" "1" \
+    "$( SECRETS_DIR="$P"; secrets recipients | grep -c '^age1' )"
+
+echo "== interop: pago's passphrase-encrypted identities file =="
+# pago always keeps identities encrypted; age only prompts on a terminal, so
+# these checks need script(1) to hand it a pty.
+if command -v script >/dev/null 2>&1 &&
+   printf 'pw\npw\n' | script -qec \
+       "$AGEBIN -a -e -p -o $T/id.enc $T/id2.txt" /dev/null >/dev/null 2>&1 &&
+   [ -s "$T/id.enc" ]; then
+    G="$T/pago"
+    mkdir -p "$G/store"
+    cp "$T/id.enc" "$G/identities"
+    "$KG" -y "$T/id2.txt" > "$G/store/.age-recipients"
+    printf 'pago-secret\n' | ( SECRETS_DIR="$G"; secrets enc svc )
+    check "enc needs no passphrase (recipients file only)" "0" "$?"
+    check "pago-style blob is plain age" "1" \
+        "$("$AGEBIN" -d -i "$T/id2.txt" "$G/store/svc.age" | grep -c 'pago-secret')"
+    t_out=$(printf 'pw\n' | script -qec \
+        "env SECRETS_DIR=$G $(dirname "$0")/../bin/secrets dec svc" /dev/null 2>/dev/null)
+    printf '%s' "$t_out" | grep -q 'pago-secret'
+    check "dec decrypts the encrypted identities file" "0" "$?"
+    check "no decrypted identity left in /dev/shm" "0" \
+        "$(find /dev/shm -maxdepth 1 -name '.secrets-id.*' 2>/dev/null | wc -l)"
+    check "no decrypted identity left in TMPDIR" "0" \
+        "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' 2>/dev/null | wc -l)"
+else
+    echo "  skip pago encrypted-identities checks (no script(1) pty available)"
+fi
+
+echo "== migrating a pre-0.2 flat store =="
+L="$T/legacy"
+mkdir -p "$L"
+cp "$ID" "$L/identity.txt"
+"$KG" -y "$L/identity.txt" > "$L/recipients.txt"
+"$AGEBIN" -e -R "$L/recipients.txt" -o "$L/old.age" <<'EOF'
+legacy-value
+EOF
+( SECRETS_DIR="$L"; secrets ls ) >/dev/null 2>&1
+check "legacy store is refused, not silently replaced" "4" "$?"
+( SECRETS_DIR="$L"; secrets ls ) 2>&1 | grep -q 'secrets migrate'
+check "refusal points at secrets migrate" "0" "$?"
+( SECRETS_DIR="$L"; secrets migrate ) >/dev/null 2>&1
+check "migrate rc" "0" "$?"
+check "blob moved into store/" "1" "$([ -f "$L/store/old.age" ] && echo 1)"
+check "identity.txt -> identities" "1" "$([ -f "$L/identities" ] && echo 1)"
+check "recipients.txt -> store/.age-recipients" "1" \
+    "$([ -f "$L/store/.age-recipients" ] && echo 1)"
+check "migrated secret decrypts" "legacy-value" "$( SECRETS_DIR="$L"; secrets dec old )"
+( SECRETS_DIR="$L"; secrets migrate ) >/dev/null 2>&1
+check "migrate refuses to run twice" "1" "$?"
 
 echo "== completions emit and parse =="
 secrets completions bash > "$T/c.bash"; check "bash emit rc" "0" "$?"
@@ -150,6 +343,12 @@ secrets completions powershell >/dev/null 2>&1; check "unknown shell rc" "2" "$?
 grep -qw rename "$T/c.bash"; check "bash completes rename" "0" "$?"
 grep -qw rename "$T/c.zsh";  check "zsh completes rename" "0" "$?"
 grep -qw rename "$T/c.fish"; check "fish completes rename" "0" "$?"
+grep -qw migrate "$T/c.bash"; check "bash completes migrate" "0" "$?"
+grep -qw migrate "$T/c.zsh";  check "zsh completes migrate" "0" "$?"
+grep -qw migrate "$T/c.fish"; check "fish completes migrate" "0" "$?"
+# names are free-form now, so the bash completion must never expand them
+grep -q 'compgen -W "$(secrets ls' "$T/c.bash"
+check "bash completion does not expand stored names" "1" "$?"
 
 echo "== cli wrapper =="
 CLI=$(dirname "$0")/../bin/secrets
@@ -219,10 +418,10 @@ check "cli: no args is help" "0" "$?"
 # exit code 3 (missing identity) also crosses the process boundary; move
 # the identity aside and always restore it right after, so a failing
 # check here cannot leave the store without its identity file.
-mv "$SECRETS_IDENTITY" "$T/id.cli.bak"
+mv "$ID" "$T/id.cli.bak"
 env SECRETS_LIB= "$CLI" dec github >/dev/null 2>&1
 check "cli: missing identity rc" "3" "$?"
-mv "$T/id.cli.bak" "$SECRETS_IDENTITY"
+mv "$T/id.cli.bak" "$ID"
 
 # stdin flows through the wrapper unchanged
 printf 'via-cli\n' | env SECRETS_LIB= "$CLI" enc fromcli
@@ -260,6 +459,10 @@ cli_err=$( unset HOME SECRETS_DIR; "$CLI" ls 2>&1 >/dev/null )
 check "cli: no HOME/SECRETS_DIR rc" "2" "$?"
 printf '%s' "$cli_err" | grep -q '^secrets: neither SECRETS_DIR nor HOME'
 check "cli: no HOME/SECRETS_DIR is branded" "0" "$?"
+
+# SECRETS_DIR alone selects a whole foreign store, layout and all
+check "cli: SECRETS_DIR alone reaches the passage store" "fallback" \
+    "$(env SECRETS_LIB= SECRETS_DIR="$P" "$CLI" dec fb)"
 
 # a staged `make install` tree resolves via the prefix-relative candidate
 if command -v make >/dev/null 2>&1; then
@@ -304,13 +507,15 @@ else
 fi
 
 echo "== no variable leakage into sourcing shell (subshell bodies) =="
-for var in agebin keygen out tmp in name f n stage st pub force src dst; do
+for var in agebin keygen out tmp in name f n stage st pub force src dst \
+           bin dir sub idf rf list legacy; do
     eval "val=\${$var-__UNSET__}"
     [ "$val" = "__UNSET__" ] && ok "no leak: \$$var" || bad "leaked: \$$var=[$val]"
 done
 
 echo "== permissions / no plaintext left behind =="
-check "all blobs 600" "0" "$(find "$SECRETS_DIR" -name '*.age' ! -perm 600 | wc -l)"
+check "all blobs 600" "0" "$(find "$STORE" -name '*.age' ! -perm 600 | wc -l)"
+check "no staging temp files left" "0" "$(find "$STORE" -name '.tmp.*' | wc -l)"
 if grep -rIl 'ghp_abc123' "$SECRETS_DIR" 2>/dev/null | grep -q .; then
     bad "plaintext found in store"
 else ok "no plaintext in store"; fi

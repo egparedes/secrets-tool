@@ -19,6 +19,7 @@ jobs:
           sudo apt-get install -y -q shellcheck
           shellcheck --shell=sh lib/secrets-lib.sh
           shellcheck --shell=sh tests/test-secrets.sh
+          shellcheck --shell=sh tests/test-interop.sh
           shellcheck bin/secrets
 
   test:
@@ -54,3 +55,40 @@ jobs:
         env:
           SECRETS_AGE: ${{ matrix.backend }}
         run: ${{ matrix.shell }} tests/test-secrets.sh
+
+  interop:
+    # The store layout is only compatible if passage and pago say it is, so
+    # drive one store with all three rather than trusting the file names.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install age
+        run: |
+          curl -fsSL "https://dl.filippo.io/age/latest?for=linux/amd64" \
+            | sudo tar -xz -C /usr/local/bin --strip-components=1 age/age age/age-keygen
+
+      # Both are pinned: this job is a compatibility claim, so a failure here
+      # should mean our layout drifted, not that upstream moved overnight.
+      # Bumping either version re-verifies the claim against that release.
+      - name: Install passage
+        env:
+          PASSAGE_VERSION: 1.7.4a2
+        run: |
+          curl -fsSL -o passage.sh \
+            "https://raw.githubusercontent.com/FiloSottile/passage/${PASSAGE_VERSION}/src/password-store.sh"
+          sudo install -m 755 passage.sh /usr/local/bin/passage
+
+      - name: Install pago
+        env:
+          PAGO_VERSION: v0.25.0
+        run: |
+          go install "dbohdan.com/pago/cmd/...@${PAGO_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run interop suite
+        run: sh tests/test-interop.sh

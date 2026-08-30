@@ -4,10 +4,10 @@ DESTDIR ?=
 BINDIR = $(DESTDIR)$(PREFIX)/bin
 LIBDIR = $(DESTDIR)$(PREFIX)/share/secrets
 
-.PHONY: all install uninstall test
+.PHONY: all install uninstall test test-interop
 
 all:
-	@echo 'targets: install uninstall test   (PREFIX=$(PREFIX))'
+	@echo 'targets: install uninstall test test-interop   (PREFIX=$(PREFIX))'
 
 install:
 	# umask, not chmod: this sets the mode of directories we create (all
@@ -25,3 +25,8 @@ uninstall:
 
 test:
 	sh tests/test-secrets.sh
+
+# Drives one store with secrets and with the real passage(1)/pago(1). Each
+# block skips itself when its program is not on PATH.
+test-interop:
+	sh tests/test-interop.sh
