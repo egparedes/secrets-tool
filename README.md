@@ -266,6 +266,12 @@ Removing a machine is the reverse: delete its line, `secrets rekey`. Note
 rekeying does not retroactively protect secrets a removed key already saw —
 rotate those values.
 
+`rekey` is all-or-nothing: it stages every re-encrypted blob first, and its
+install pass hard-links each original aside before replacing it, so a
+failure part way through puts everything back. An interrupt cannot lose an
+entry, but it can leave a `.rekey.*` directory in the store; that directory
+holds nothing you need and is safe to delete.
+
 ## Testing
 
 ```sh
@@ -279,21 +285,24 @@ make test-interop                              # against real passage/pago
 `make test-interop` exits non-zero if neither passage nor pago is on your
 `PATH` — a run that verified nothing is not a pass.
 
-The main suite is 252 checks as an ordinary user, 248 as root. Blocks skip
-themselves when they cannot run: four need a non-root user (rekey's
-install-rollback check turns on a directory permission root ignores), five
-need `script`(1) to hand age a pty, eleven need `make`, two need no
-system-wide library installed, and one needs `zsh`.
+The main suite is 272 checks as an ordinary user, 266 as root. Blocks skip
+themselves when they cannot run: six need a non-root user (they turn on
+directory permissions root ignores), eleven need `script`(1) to hand a
+command a pty, eleven need `make`, two need no system-wide library
+installed, and one needs `zsh`.
 
 It covers roundtrips, binary payloads, hierarchical names, the
 `.age-recipients` walk and its store-root boundary, tamper rejection,
 path-escape attempts, clobber protection, write-only operation, rekey's
-atomicity across both its staging and install passes, armor preservation,
-armor mode, encrypted identities, migration from a pre-0.2 store, shell
-completions driven the way readline drives them, variable-leak detection,
-CLI library discovery, and install staging via `make install`/`make
-uninstall`. CI runs it across {dash, bash, zsh} × {age, rage}, plus the
-interop suite against pinned passage and pago releases.
+atomicity across both its staging and install passes (including an
+interrupted install, which must not destroy an entry), armor preservation,
+armor mode, encrypted identities and their unwrapped temporaries, migration
+from a pre-0.2 store and recovery from a half-finished one, `rm`'s prompt
+and its refusal off a terminal, shell completions driven the way readline
+drives them, variable-leak detection, CLI library discovery, and install
+staging via `make install`/`make uninstall`. CI runs it across {dash, bash,
+zsh} × {age, rage}, plus the interop suite against pinned passage and pago
+releases.
 
 ## Threat model
 

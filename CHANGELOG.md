@@ -71,8 +71,24 @@ guarantees — the layout and the naming rules changed underneath them.
 - **`rekey`'s install pass is now genuinely all-or-nothing.** It was a bare
   loop of `mv`s: a failure part way through left the store split across two
   recipient sets, and the cleanup trap then deleted the remaining work. Each
-  original is now moved into the staging tree before its replacement lands,
-  so a failure rolls every entry back.
+  original is now hard-**linked** into the staging tree before its
+  replacement lands, so the entry never stops existing at its real path: an
+  interrupt cannot destroy it, and a failure rolls every entry back. (An
+  interim version of this fix *moved* the original aside instead, which
+  opened a window where a signal destroyed the in-flight entry outright —
+  worse than the bug it replaced. It never shipped outside review.)
+- **Signal traps now exit.** A `trap ... EXIT HUP INT TERM` that only cleans
+  up lets execution resume afterwards, in dash, bash and zsh alike — so a
+  signal ran the cleanup and then carried on against the tree it had just
+  deleted. Cleanup stays on `EXIT`; signals exit and let `EXIT` do it.
+- **A failed `migrate` no longer bricks the store.** The guard keyed off
+  `store/` existing, so any failure after that directory was created was
+  terminal: the guard stopped firing, `secrets ls` reported an empty store,
+  and the blobs and identity sat untouched in `$SECRETS_DIR`. The guard now
+  keys off the leftover artifacts, `migrate` is re-runnable, and its scratch
+  file is removed on every path.
+- `rename` preserves an entry's armor across a recipients boundary, as
+  `rekey` already did.
 - **`rekey` no longer converts a pago store's armored entries to binary.**
   Armor is decided per entry from the file already on disk.
 - **`secrets rm` no longer silently does nothing.** `rm -i` reads its

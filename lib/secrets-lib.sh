@@ -210,7 +210,7 @@ _secrets_identity_open() (
     # The caller's trap cannot fire for this file yet -- it guards $idf, which
     # stays empty until this substitution returns -- and age sits at a human's
     # passphrase prompt in between. Guard it here for the length of that wait.
-    trap 'rm -f "$tmp"' HUP INT TERM
+    trap 'rm -f "$tmp"; exit 1' HUP INT TERM
 
     # Prompting happens on the terminal; stdout here is a command substitution.
     if "$agebin" -d -o "$tmp" "$SECRETS_IDENTITY"; then
@@ -249,8 +249,8 @@ _secrets_encrypt_to() (
         set -- -R "$rf"
     else
         if [ -z "$idf" ]; then
-            trap '[ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' \
-                EXIT HUP INT TERM
+            trap '[ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' EXIT
+            trap 'exit 1' HUP INT TERM
             idf=$(_secrets_identity_open) || exit $?
         fi
         set -- -i "$idf"
@@ -281,19 +281,25 @@ _secrets_prune() (
     exit 0
 )
 
-# A store written before 0.2 keeps blobs, identity.txt and recipients.txt
-# directly in $SECRETS_DIR. Refuse to run against one rather than silently
-# starting a second, empty store beside it.
-_secrets_legacy_guard() (
-    [ -d "$SECRETS_STORE" ] && exit 0
-    legacy=''
-    [ -e "$SECRETS_DIR/identity.txt" ] && legacy=1
-    [ -e "$SECRETS_DIR/recipients.txt" ] && legacy=1
+# True when $SECRETS_DIR still holds a pre-0.2 flat store's artifacts: blobs,
+# identity.txt or recipients.txt sitting directly in the base directory.
+_secrets_has_legacy() (
+    [ -e "$SECRETS_DIR/identity.txt" ] && exit 0
+    [ -e "$SECRETS_DIR/recipients.txt" ] && exit 0
     # find, not a glob: zsh makes an unmatched glob a fatal error rather than
     # leaving it literal, which would kill every subcommand on a fresh store.
     [ -n "$(find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null |
-            head -n 1)" ] && legacy=1
-    [ -n "$legacy" ] || exit 0
+            head -n 1)" ] && exit 0
+    exit 1
+)
+
+# Refuse to run against a pre-0.2 store rather than silently starting a second,
+# empty one beside it. Deliberately keyed on the leftover artifacts and not on
+# whether store/ exists: a migrate that failed part way leaves both, and this
+# has to keep firing until the last artifact is gone, or that half-migrated
+# store would look empty and healthy.
+_secrets_legacy_guard() (
+    _secrets_has_legacy || exit 0
     printf 'secrets: %s holds a pre-0.2 flat store (run: secrets migrate)\n' \
         "$SECRETS_DIR" >&2
     exit 4
@@ -354,7 +360,8 @@ _secrets_enc() (
 
     ( umask 077 && mkdir -p "${out%/*}" ) || exit 1
     tmp=''
-    trap '[ -z "$tmp" ] || rm -f "$tmp"' EXIT HUP INT TERM
+    trap '[ -z "$tmp" ] || rm -f "$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
     tmp=$(mktemp "${out%/*}/.tmp.XXXXXX") || exit 1
     if ! _secrets_encrypt_to "$tmp" "$sub"; then
         printf 'secrets: encryption failed, %s left untouched\n' "$out" >&2
@@ -378,8 +385,8 @@ _secrets_dec() (
         exit 1
     fi
     idf=''
-    trap '[ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' \
-        EXIT HUP INT TERM
+    trap '[ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' EXIT
+    trap 'exit 1' HUP INT TERM
     idf=$(_secrets_identity_open) || exit $?
     "$agebin" -d -i "$idf" "$in"
 )
@@ -419,18 +426,20 @@ _secrets_rm() (
     fi
 
     if [ "$force" -eq 1 ]; then
-        rm -f -- "$f" || exit 1
+        rm -f -- "$f"
     elif [ -t 0 ]; then
         rm -i -- "$f"
-        if [ -e "$f" ]; then exit 1; fi          # declined at the prompt
     else
         printf 'secrets: rm needs a terminal to confirm; use: secrets rm -f %s\n' \
             "$1" >&2
         exit 1
     fi
 
+    # The single arbiter for both branches: `rm -i` reports success when the
+    # user declines, and rm's own failures (a read-only directory, EIO) leave
+    # the file in place, so the file being gone is the only proof it went.
     if [ -e "$f" ]; then
-        printf 'secrets: could not remove %s\n' "$1" >&2
+        printf 'secrets: %s was not removed\n' "$1" >&2
         exit 1
     fi
     _secrets_prune "$f"
@@ -476,8 +485,9 @@ _secrets_rename() (
     idf=''
     tmp=''
     st=''
-    trap '_secrets_scrub "$tmp" "$st"; [ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' \
-        EXIT HUP INT TERM
+    trap '_secrets_scrub "$tmp" "$st"
+          [ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' EXIT
+    trap 'exit 1' HUP INT TERM
     idf=$(_secrets_identity_open) || exit $?
 
     tmp=$(mktemp "${dst%/*}/.tmp.XXXXXX") || exit 1
@@ -487,7 +497,7 @@ _secrets_rename() (
     # clean re-encryption and cost the source. Funnel the producer's status
     # through a file instead.
     { "$agebin" -d -i "$idf" "$src" || echo fail > "$st"; } \
-        | _secrets_encrypt_to "$tmp" "$sub" "$idf"
+        | _secrets_encrypt_to "$tmp" "$sub" "$idf" "$(_secrets_armor_of "$src")"
     if [ ! -s "$st" ] && [ -s "$tmp" ]; then
         chmod 600 "$tmp" && mv -f -- "$tmp" "$dst" || exit 1
         tmp=''
@@ -516,8 +526,8 @@ _secrets_recipients() (
     if [ -r "$SECRETS_IDENTITY" ]; then
         keygen=$(_secrets_keygen) || exit $?
         idf=''
-        trap '[ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' \
-            EXIT HUP INT TERM
+        trap '[ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' EXIT
+        trap 'exit 1' HUP INT TERM
         idf=$(_secrets_identity_open) || exit $?
         printf '# derived from %s (no .age-recipients in the store)\n' \
             "$SECRETS_IDENTITY"
@@ -543,8 +553,8 @@ _secrets_rekey() (
     # One trap for every exit path, success included: the staging tree and any
     # unwrapped identity are temporaries, and no branch below may outlive them.
     trap '[ -z "$stage" ] || rm -rf "$stage"
-          [ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' \
-        EXIT HUP INT TERM
+          [ -z "$idf" ] || [ "$idf" = "$SECRETS_IDENTITY" ] || rm -f "$idf"' EXIT
+    trap 'exit 1' HUP INT TERM
     stage=$(mktemp -d "$SECRETS_STORE/.rekey.XXXXXX") || exit 1
     idf=$(_secrets_identity_open) || exit 3
 
@@ -575,10 +585,12 @@ _secrets_rekey() (
         exit 0
     fi
 
-    # Installing is the other half of all-or-nothing. Each original is moved
-    # into the staging tree before its replacement lands, so a failure part
-    # way through (ENOSPC, EACCES, EIO) can put every entry back rather than
-    # leaving the store split across two recipient sets.
+    # Installing is the other half of all-or-nothing. Each original is hard
+    # LINKED into the staging tree, never moved into it: the entry keeps
+    # existing at its real path the whole time, so an interrupt that deletes
+    # the staging tree cannot destroy it, and a failure part way through can
+    # still put every already-installed entry back. $stage lives inside the
+    # store, so the link is always within one filesystem.
     mkdir -p "$stage/.orig" || exit 1
     done_list="$stage/.done"
     : > "$done_list" || exit 1
@@ -589,53 +601,72 @@ _secrets_rekey() (
         if [ -n "$sub" ] && ! mkdir -p "$stage/.orig/$sub"; then
             failed_at=$name; break
         fi
-        if ! mv -f -- "$SECRETS_STORE/$name.age" "$stage/.orig/$name.age"; then
+        if ! ln -- "$SECRETS_STORE/$name.age" "$stage/.orig/$name.age" 2>/dev/null &&
+           ! cp -p -- "$SECRETS_STORE/$name.age" "$stage/.orig/$name.age"; then
             failed_at=$name; break
         fi
+        # Only this rename touches the live entry, and it is atomic: it either
+        # names the old blob or the new one, never nothing.
         if ! chmod 600 "$stage/$name.age" ||
            ! mv -f -- "$stage/$name.age" "$SECRETS_STORE/$name.age"; then
-            mv -f -- "$stage/.orig/$name.age" "$SECRETS_STORE/$name.age" 2>/dev/null
             failed_at=$name; break
         fi
         printf '%s\n' "$name" >> "$done_list"
     done < "$list"
 
     if [ -n "$failed_at" ]; then
+        restored=1
         while IFS= read -r name; do
             [ -n "$name" ] || continue
-            mv -f -- "$stage/.orig/$name.age" "$SECRETS_STORE/$name.age" 2>/dev/null
+            # A failed restore is the one case worth shouting about: the old
+            # blob then exists only inside the staging tree.
+            if ! mv -f -- "$stage/.orig/$name.age" "$SECRETS_STORE/$name.age"; then
+                restored=0
+                printf 'secrets: could not restore %s\n' "$name" >&2
+            fi
         done < "$done_list"
-        printf 'secrets: failed to install %s, rolled back, nothing changed\n' \
-            "$failed_at" >&2
+        if [ "$restored" -eq 1 ]; then
+            printf 'secrets: failed to install %s, rolled back, nothing changed\n' \
+                "$failed_at" >&2
+        else
+            printf 'secrets: failed to install %s and could not roll back; the\n' \
+                "$failed_at" >&2
+            printf 'secrets: originals are kept in %s -- restore them by hand\n' \
+                "$stage" >&2
+            stage=''                 # keep it: it holds the only copy
+        fi
         exit 1
     fi
     printf 'secrets: rekeyed %d secret(s)\n' "$n" >&2
 )
 
-# One-shot conversion of a pre-0.2 flat store into the passage/pago layout.
+# Convert a pre-0.2 flat store into the passage/pago layout. Re-runnable: it
+# keys off the leftover artifacts, so a run that failed part way (a bad mv, a
+# read-only base directory) can simply be run again to finish the job.
 _secrets_migrate() (
-    if [ -d "$SECRETS_STORE" ]; then
-        printf 'secrets: %s already exists, nothing to migrate\n' "$SECRETS_STORE" >&2
-        exit 1
-    fi
     if [ ! -d "$SECRETS_DIR" ]; then
         printf 'secrets: no store at %s\n' "$SECRETS_DIR" >&2
         exit 1
     fi
+    if ! _secrets_has_legacy; then
+        printf 'secrets: nothing to migrate in %s\n' "$SECRETS_DIR" >&2
+        exit 1
+    fi
+
+    list="$SECRETS_DIR/.migrate.list"
+    trap 'rm -f "$list"' EXIT
+    trap 'exit 1' HUP INT TERM
 
     ( umask 077 && mkdir -p "$SECRETS_STORE" ) || exit 1
     chmod 700 "$SECRETS_STORE" || exit 1
 
     n=0
-    # find, not a glob: see _secrets_legacy_guard.
-    find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null \
-        > "$SECRETS_DIR/.migrate.list" || exit 1
+    find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null > "$list" || exit 1
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         mv -- "$f" "$SECRETS_STORE/${f##*/}" || exit 1
         n=$((n + 1))
-    done < "$SECRETS_DIR/.migrate.list"
-    rm -f "$SECRETS_DIR/.migrate.list"
+    done < "$list"
 
     if [ -e "$SECRETS_DIR/identity.txt" ] && [ ! -e "$SECRETS_IDENTITY" ]; then
         mv -- "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" || exit 1
@@ -644,6 +675,15 @@ _secrets_migrate() (
     if [ -e "$SECRETS_DIR/recipients.txt" ] && [ ! -e "$rf" ]; then
         mv -- "$SECRETS_DIR/recipients.txt" "$rf" || exit 1
     fi
+
+    # A directory called NAME.age is not an entry; say so rather than leaving
+    # it behind silently for the guard to keep tripping over.
+    find "$SECRETS_DIR" -maxdepth 1 -mindepth 1 -type d -name '*.age' 2>/dev/null |
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            printf 'secrets: left %s alone: it is a directory, not an entry\n' \
+                "$f" >&2
+        done
 
     printf 'secrets: moved %d secret(s) into %s\n' "$n" "$SECRETS_STORE" >&2
     printf 'secrets: identity   %s\n' "$SECRETS_IDENTITY" >&2

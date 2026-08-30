@@ -30,6 +30,14 @@ SECRETS_LIB=${SECRETS_LIB:-$(dirname "$0")/../lib/secrets-lib.sh}
 # shellcheck disable=SC1090  # path is computed
 . "$SECRETS_LIB"
 
+# Unwrapped identities land in a shared directory (/dev/shm or $TMPDIR), so
+# asserting a global count of zero makes these checks hostage to anything
+# else on the machine. Compare against the count taken just before instead.
+t_idtmp() {
+    find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' \
+        2>/dev/null | wc -l | tr -d ' '
+}
+
 printf 'backend: %s\n' "$(_secrets_age)"
 AGEBIN=$(_secrets_age)
 KG=$(_secrets_keygen)
@@ -144,12 +152,12 @@ check "rekey covers nested entries" "AKIA-nested" \
 check "no stage dirs left" "0" "$(find "$SECRETS_DIR" -name '.rekey.*' | wc -l)"
 
 echo "== rekey is all-or-nothing =="
+t_id0=$(t_idtmp)
 printf 'corrupt-me\n' > "$STORE/broken.age"
 secrets rekey >/dev/null 2>&1; check "rekey aborts on bad blob" "1" "$?"
 check "github untouched after abort" "$t_before" "$(secrets dec github)"
 check "no stage dir after abort" "0" "$(find "$SECRETS_DIR" -name '.rekey.*' | wc -l)"
-check "no identity temporaries after abort" "0" \
-    "$(find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' 2>/dev/null | wc -l)"
+check "no identity temporaries after abort" "$t_id0" "$(t_idtmp)"
 rm -f "$STORE/broken.age"
 
 echo "== rekey's install pass rolls back =="
@@ -177,6 +185,70 @@ if [ "$(id -u)" -ne 0 ]; then
         "$(find "$t_rb" -name '.rekey.*' | wc -l)"
 else
     echo "  skip rekey install-rollback checks (running as root)"
+fi
+
+echo "== rekey's install pass never lets an entry stop existing =="
+# The install pass hard-LINKS each original into the staging tree rather than
+# moving it there, so the entry keeps existing at its real path throughout.
+# A shim on chmod -- which the library calls unqualified -- makes the install
+# fail after the link is in place, which is the branch that would otherwise
+# lose the in-flight entry.
+t_ln="$T/linkinstall"
+mkdir -p "$T/shim"
+cat > "$T/shim/chmod" <<'SHIM'
+#!/bin/sh
+case "$*" in *ccc*) echo "chmod: simulated failure" >&2; exit 1 ;; esac
+exec /bin/chmod "$@"
+SHIM
+chmod 755 "$T/shim/chmod"
+( SECRETS_DIR="$t_ln"; secrets init ) >/dev/null 2>&1
+for t_n in aaa bbb ccc ddd; do
+    printf 'V-%s\n' "$t_n" | ( SECRETS_DIR="$t_ln"; secrets enc "$t_n" )
+done
+"$KG" -y "$T/id2.txt" >> "$t_ln/store/.age-recipients"
+( SECRETS_DIR="$t_ln"; PATH="$T/shim:$PATH"; secrets rekey ) >/dev/null 2>&1
+check "rekey fails when an install step fails" "1" "$?"
+check "the in-flight entry still exists" "1" \
+    "$([ -f "$t_ln/store/ccc.age" ] && echo 1 || echo 0)"
+check "every entry still decrypts" "V-aaa V-bbb V-ccc V-ddd" \
+    "$( SECRETS_DIR="$t_ln"
+        printf '%s %s %s %s' "$(secrets dec aaa)" "$(secrets dec bbb)" \
+            "$(secrets dec ccc)" "$(secrets dec ddd)" )"
+check "and none was left rekeyed" "0" \
+    "$("$AGEBIN" -d -i "$T/id2.txt" "$t_ln/store/aaa.age" >/dev/null 2>&1 && echo 1 || echo 0)"
+check "no stage dir left" "0" "$(find "$t_ln" -name '.rekey.*' | wc -l)"
+
+echo "== an interrupted rekey must not destroy an entry =="
+# Regression test for a rollback that moved originals out of the store: a
+# signal then deleted the staging tree while an entry lived only inside it.
+# Needs a pty, so that Ctrl-C reaches the whole process group the way a user's
+# would -- a backgrounded job has SIGINT ignored on entry and cannot trap it.
+if command -v script >/dev/null 2>&1; then
+    t_int="$T/interrupt"
+    cat > "$T/shim/slowchmod" <<'SHIM'
+#!/bin/sh
+case "$*" in *ccc*) sleep 12 ;; esac
+exec /bin/chmod "$@"
+SHIM
+    mkdir -p "$T/shim2"
+    cp "$T/shim/slowchmod" "$T/shim2/chmod"
+    chmod 755 "$T/shim2/chmod"
+    ( SECRETS_DIR="$t_int"; secrets init ) >/dev/null 2>&1
+    for t_n in aaa bbb ccc ddd; do
+        printf 'V-%s\n' "$t_n" | ( SECRETS_DIR="$t_int"; secrets enc "$t_n" )
+    done
+    "$KG" -y "$T/id2.txt" >> "$t_int/store/.age-recipients"
+    { sleep 5; printf '\003'; sleep 3; } | script -qec \
+        "env SECRETS_DIR=$t_int PATH=$T/shim2:$BINDIR:$PATH secrets rekey" \
+        /dev/null >/dev/null 2>&1
+    check "no entry was destroyed by the interrupt" "4" \
+        "$(find "$t_int/store" -maxdepth 1 -name '*.age' | wc -l | tr -d ' ')"
+    check "and all four still decrypt" "V-aaa V-bbb V-ccc V-ddd" \
+        "$( SECRETS_DIR="$t_int"
+            printf '%s %s %s %s' "$(secrets dec aaa)" "$(secrets dec bbb)" \
+                "$(secrets dec ccc)" "$(secrets dec ddd)" )"
+else
+    echo "  skip interrupted-rekey check (no script(1) pty available)"
 fi
 
 echo "== per-subtree .age-recipients (passage's walk) =="
@@ -220,6 +292,10 @@ check "recipients NAME reports the subtree file" \
     "$(cat "$STORE/proj/.age-recipients")" "$(secrets recipients proj/key)"
 check "recipients with no arg reports the root file" \
     "$(cat "$RCP")" "$(secrets recipients)"
+secrets recipients '' >/dev/null 2>&1
+check "recipients rejects an empty name rather than reporting the root" "2" "$?"
+secrets recipients '../escape' >/dev/null 2>&1
+check "recipients validates the name" "2" "$?"
 
 echo "== rename re-encrypts across a recipients boundary =="
 secrets rename proj/key movedout
@@ -328,6 +404,40 @@ secrets rm -f nosuch >/dev/null 2>&1
 check "rm -f of a missing secret still fails" "1" "$?"
 secrets rm -f '../escape' >/dev/null 2>&1
 check "rm -f still validates the name" "2" "$?"
+# The interactive branch needs a terminal, so it needs a pty.
+if command -v script >/dev/null 2>&1; then
+    printf 'yesplease\n' | secrets enc promptyes
+    printf 'y\n' | script -qec \
+        "env SECRETS_DIR=$SECRETS_DIR $BINDIR/secrets rm promptyes" /dev/null \
+        >/dev/null 2>&1
+    check "answering y at the prompt deletes" "0" "$(secrets ls | grep -cx promptyes)"
+    printf 'nothanks\n' | secrets enc promptno
+    printf 'n\n' | script -qec \
+        "env SECRETS_DIR=$SECRETS_DIR $BINDIR/secrets rm promptno" /dev/null \
+        >/dev/null 2>&1
+    # `rm -i` exits 0 when the user declines, so the status has to come from
+    # checking the file is actually gone -- not from rm.
+    check "declining at the prompt fails, not succeeds" "1" "$?"
+    check "declining at the prompt keeps it" "1" "$(secrets ls | grep -cx promptno)"
+    check "and it still decrypts" "nothanks" "$(secrets dec promptno)"
+    secrets rm -f promptno >/dev/null 2>&1
+else
+    echo "  skip rm prompt checks (no script(1) pty available)"
+fi
+# rm must not report success when the file is still there afterwards. Root
+# ignores the directory permission this turns on.
+if [ "$(id -u)" -ne 0 ]; then
+    t_ro="$T/readonly"
+    ( SECRETS_DIR="$t_ro"; secrets init ) >/dev/null 2>&1
+    printf 'stuck\n' | ( SECRETS_DIR="$t_ro"; secrets enc stuck )
+    chmod 500 "$t_ro/store"
+    ( SECRETS_DIR="$t_ro"; secrets rm -f stuck ) >/dev/null 2>&1
+    check "rm -f fails when the file cannot be removed" "1" "$?"
+    chmod 700 "$t_ro/store"
+    check "and the secret is still there" "stuck" "$( SECRETS_DIR="$t_ro"; secrets dec stuck )"
+else
+    echo "  skip rm-cannot-remove check (running as root)"
+fi
 secrets help >/dev/null; check "help rc" "0" "$?"
 secrets bogus >/dev/null 2>&1; check "unknown subcommand rc" "2" "$?"
 
@@ -399,6 +509,7 @@ if command -v script >/dev/null 2>&1 &&
    printf 'pw\npw\n' | script -qec \
        "$AGEBIN -a -e -p -o $T/id.enc $T/id2.txt" /dev/null >/dev/null 2>&1 &&
    [ -s "$T/id.enc" ]; then
+    t_idbase=$(t_idtmp)
     G="$T/pago"
     mkdir -p "$G/store"
     cp "$T/id.enc" "$G/identities"
@@ -411,10 +522,19 @@ if command -v script >/dev/null 2>&1 &&
         "env SECRETS_DIR=$G $(dirname "$0")/../bin/secrets dec svc" /dev/null 2>/dev/null)
     printf '%s' "$t_out" | grep -q 'pago-secret'
     check "dec decrypts the encrypted identities file" "0" "$?"
-    check "no decrypted identity left in /dev/shm" "0" \
-        "$(find /dev/shm -maxdepth 1 -name '.secrets-id.*' 2>/dev/null | wc -l)"
-    check "no decrypted identity left in TMPDIR" "0" \
-        "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' 2>/dev/null | wc -l)"
+    check "no decrypted identity left behind" "$t_idbase" "$(t_idtmp)"
+    # Interrupting at the passphrase prompt must not strand the unwrapped
+    # identity: the file exists during that whole wait, and the caller's trap
+    # cannot cover it ($idf is still empty until the substitution returns).
+    G2="$T/pago2"
+    mkdir -p "$G2/store"
+    cp "$T/id.enc" "$G2/identities"
+    "$KG" -y "$T/id2.txt" > "$G2/store/.age-recipients"
+    printf 'v\n' | ( SECRETS_DIR="$G2"; secrets enc svc2 )
+    { sleep 3; printf '\003'; sleep 2; } | script -qec \
+        "env SECRETS_DIR=$G2 $BINDIR/secrets dec svc2" /dev/null >/dev/null 2>&1
+    check "an interrupt at the passphrase prompt strands nothing" "$t_idbase" \
+        "$(t_idtmp)"
 else
     echo "  skip pago encrypted-identities checks (no script(1) pty available)"
 fi
@@ -441,6 +561,25 @@ check "its identity moved" "1" "$([ -f "$t_part/identities" ] && echo 1)"
 check "its recipients moved" "1" "$([ -f "$t_part/store/.age-recipients" ] && echo 1)"
 check "no migrate scratch file left" "0" \
     "$(find "$t_part" -name '.migrate.list' | wc -l)"
+# a legacy store detectable only by its blobs -- someone whose identity and
+# recipients live elsewhere via SECRETS_IDENTITY/SECRETS_RECIPIENTS
+t_blob="$T/bloblegacy"
+mkdir -p "$t_blob"
+"$AGEBIN" -e -R "$RCP" -o "$t_blob/solo.age" <<'EOF'
+blob-only
+EOF
+( SECRETS_DIR="$t_blob"; secrets ls ) >/dev/null 2>&1
+check "a blob-only legacy store is refused" "4" "$?"
+( SECRETS_DIR="$t_blob"; secrets migrate ) >/dev/null 2>&1
+check "and migrates" "0" "$?"
+check "its blob moved into store/" "1" "$([ -f "$t_blob/store/solo.age" ] && echo 1)"
+( SECRETS_DIR="$t_blob"; secrets ls ) >/dev/null 2>&1
+check "the guard stops firing once migrated" "0" "$?"
+# a half-migrated store must keep being refused, not look empty and healthy
+printf 'x\n' > "$t_blob/leftover.age"
+( SECRETS_DIR="$t_blob"; secrets ls ) >/dev/null 2>&1
+check "a half-migrated store is still refused" "4" "$?"
+rm -f "$t_blob/leftover.age"
 
 echo "== migrating a pre-0.2 flat store =="
 L="$T/legacy"
