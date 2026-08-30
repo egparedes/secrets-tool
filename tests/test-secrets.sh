@@ -383,6 +383,17 @@ check "rename out of the subtree rc" "0" "$?"
 check "moved entry readable with the store identity" "subtree-value" "$(secrets dec movedout)"
 "$AGEBIN" -d -i "$T/id3.txt" "$STORE/movedout.age" >/dev/null 2>&1
 check "moved entry no longer readable by the subtree-only key" "1" "$?"
+# rename re-encrypts across a recipients boundary, and must keep the entry in
+# the format it found it in, exactly as rekey does.
+printf 'ARMOVE\n' | SECRETS_ARMOR=1 secrets enc proj/armmove
+check "the source is armored" "1" \
+    "$(head -n 1 "$STORE/proj/armmove.age" | grep -c 'BEGIN AGE ENCRYPTED FILE')"
+secrets rename proj/armmove armmoved
+check "rename across the boundary rc" "0" "$?"
+check "the renamed entry is still armored" "1" \
+    "$(head -n 1 "$STORE/armmoved.age" | grep -c 'BEGIN AGE ENCRYPTED FILE')"
+check "and still decrypts" "ARMOVE" "$(secrets dec armmoved)"
+secrets rm -f armmoved >/dev/null 2>&1
 check "source entry gone" "0" "$(secrets ls | grep -cx 'proj/key')"
 # proj/ is not pruned: it still holds the .age-recipients that governs it.
 check "subtree kept while it still holds .age-recipients" "1" \
@@ -673,6 +684,10 @@ EOF
 check "legacy store is refused, not silently replaced" "4" "$?"
 ( SECRETS_DIR="$L"; secrets ls ) 2>&1 | grep -q 'secrets migrate'
 check "refusal points at secrets migrate" "0" "$?"
+( SECRETS_DIR="$L"; secrets ls ) 2>&1 | grep -q 'identity.txt'
+check "the refusal lists the files it found" "0" "$?"
+( SECRETS_DIR="$L"; secrets ls ) 2>&1 | grep -q 'old.age'
+check "including the legacy blobs" "0" "$?"
 ( SECRETS_DIR="$L"; secrets migrate ) >/dev/null 2>&1
 check "migrate rc" "0" "$?"
 check "blob moved into store/" "1" "$([ -f "$L/store/old.age" ] && echo 1)"
@@ -682,6 +697,74 @@ check "recipients.txt -> store/.age-recipients" "1" \
 check "migrated secret decrypts" "legacy-value" "$( SECRETS_DIR="$L"; secrets dec old )"
 ( SECRETS_DIR="$L"; secrets migrate ) >/dev/null 2>&1
 check "migrate refuses to run twice" "1" "$?"
+
+echo "== a configured destination is not a leftover to migrate =="
+# SECRETS_IDENTITY may legitimately name $SECRETS_DIR/identity.txt, and
+# SECRETS_RECIPIENTS may name recipients.txt. Treating those as pre-0.2
+# leftovers locked the store out permanently, with migrate comparing a path
+# to itself ("both X and X exist") and never able to resolve it.
+t_cfg="$T/configured"
+mkdir -p "$t_cfg"
+t_cfgenv() { export SECRETS_DIR="$t_cfg" SECRETS_IDENTITY="$t_cfg/identity.txt" \
+    SECRETS_RECIPIENTS="$t_cfg/recipients.txt"; }
+( t_cfgenv; secrets init ) >/dev/null 2>&1
+printf 'tok\n' | ( t_cfgenv; secrets enc one )
+( t_cfgenv; secrets ls ) >/dev/null 2>&1
+check "the guard ignores a configured identity.txt" "0" "$?"
+check "and the store works" "tok" \
+    "$( t_cfgenv; secrets dec one )"
+
+# A top-level *.age that IS the identity must never be filed as an entry:
+# migrate would move the live private key into the store, in plaintext, and
+# report success -- into the directory the README says holds only ciphertext.
+t_ka="$T/keyasage"
+mkdir -p "$t_ka"
+t_kaenv() { export SECRETS_DIR="$t_ka" SECRETS_IDENTITY="$t_ka/identities.age"; }
+( t_kaenv; secrets init ) >/dev/null 2>&1
+"$AGEBIN" -e -R "$t_ka/store/.age-recipients" -o "$t_ka/legacy.age" <<'EOF'
+legacy-value
+EOF
+( t_kaenv; secrets migrate ) >/dev/null 2>&1
+check "migrate rc with the identity named *.age" "0" "$?"
+check "the private key stayed out of the store" "0" \
+    "$(grep -c 'AGE-SECRET-KEY-' "$t_ka/store/identities.age" 2>/dev/null || echo 0)"
+check "and is not listed as an entry" "0" \
+    "$( t_kaenv; secrets ls | grep -cx identities )"
+check "the real legacy blob did migrate" "legacy-value" \
+    "$( t_kaenv; secrets dec legacy )"
+
+echo "== migrate's backstop catches an artifact appearing mid-run =="
+# A *.age dropped into $SECRETS_DIR while migrate runs would otherwise leave
+# the store silently locked out at exit 0. Simulated with an mv shim rather
+# than a race, so it is deterministic.
+mkdir -p "$T/shimlate"
+cat > "$T/shimlate/mv" <<SHIM
+#!/bin/sh
+$(command -v mv) "\$@" || exit 1
+[ -f "\$LATE_DIR/late.age" ] || printf 'x\n' > "\$LATE_DIR/late.age"
+SHIM
+chmod 755 "$T/shimlate/mv"
+t_late="$T/lateartifact"
+mkdir -p "$t_late"
+cp "$ID" "$t_late/identity.txt"
+"$KG" -y "$t_late/identity.txt" > "$t_late/recipients.txt"
+"$AGEBIN" -e -R "$t_late/recipients.txt" -o "$t_late/first.age" <<'EOF'
+first
+EOF
+t_err=$( SECRETS_DIR="$t_late"; LATE_DIR="$t_late"; export LATE_DIR
+         PATH="$T/shimlate:$PATH"; secrets migrate 2>&1 >/dev/null )
+check "migrate fails when an artifact appears mid-run" "1" "$?"
+printf '%s' "$t_err" | grep -q 'migration incomplete'
+check "and says the migration is incomplete" "0" "$?"
+# The store stays locked out while the late artifact is there, rather than
+# looking empty and healthy...
+( SECRETS_DIR="$t_late"; secrets ls ) >/dev/null 2>&1
+check "the store stays refused until it is dealt with" "4" "$?"
+# ...and opens as soon as it is gone, with everything the run did intact.
+rm -f "$t_late/late.age"
+( SECRETS_DIR="$t_late"; secrets ls ) >/dev/null 2>&1
+check "and opens once it is removed" "0" "$?"
+check "the migrated entry survived" "first" "$( SECRETS_DIR="$t_late"; secrets dec first )"
 
 echo "== migrate never clobbers, and never claims success while locked out =="
 # A stale pre-0.2 blob must not silently replace a live entry of the same

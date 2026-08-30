@@ -281,15 +281,31 @@ _secrets_prune() (
     exit 0
 )
 
-# True when $SECRETS_DIR still holds a pre-0.2 flat store's artifacts: blobs,
-# identity.txt or recipients.txt sitting directly in the base directory.
+# Print the pre-0.2 blobs sitting directly in $SECRETS_DIR. A top-level
+# *.age file that this configuration already uses -- SECRETS_IDENTITY or
+# SECRETS_RECIPIENTS may legitimately name one -- is not a leftover, and
+# moving it into the store would file the live private key as an entry.
+_secrets_legacy_blobs() (
+    [ -d "$SECRETS_DIR" ] || exit 0
+    find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null |
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            [ "$f" = "$SECRETS_IDENTITY" ] && continue
+            [ -n "${SECRETS_RECIPIENTS:-}" ] && [ "$f" = "$SECRETS_RECIPIENTS" ] && continue
+            printf '%s\n' "$f"
+        done
+)
+
+# True when $SECRETS_DIR still holds a pre-0.2 flat store's artifacts. A file
+# only counts as one if it is not what this configuration already points at:
+# SECRETS_IDENTITY=$SECRETS_DIR/identity.txt means that file IS the store's
+# identity, and treating it as a leftover locked the store out for good.
 _secrets_has_legacy() (
-    [ -e "$SECRETS_DIR/identity.txt" ] && exit 0
-    [ -e "$SECRETS_DIR/recipients.txt" ] && exit 0
-    # find, not a glob: zsh makes an unmatched glob a fatal error rather than
-    # leaving it literal, which would kill every subcommand on a fresh store.
-    [ -n "$(find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null |
-            head -n 1)" ] && exit 0
+    if [ -e "$SECRETS_DIR/identity.txt" ] &&
+       [ "$SECRETS_DIR/identity.txt" != "$SECRETS_IDENTITY" ]; then exit 0; fi
+    if [ -e "$SECRETS_DIR/recipients.txt" ] &&
+       [ "$SECRETS_DIR/recipients.txt" != "${SECRETS_RECIPIENTS:-}" ]; then exit 0; fi
+    [ -n "$(_secrets_legacy_blobs | head -n 1)" ] && exit 0
     exit 1
 )
 
@@ -303,10 +319,12 @@ _secrets_legacy_guard() (
     printf 'secrets: %s holds pre-0.2 files (run: secrets migrate):\n' \
         "$SECRETS_DIR" >&2
     [ -e "$SECRETS_DIR/identity.txt" ] &&
+        [ "$SECRETS_DIR/identity.txt" != "$SECRETS_IDENTITY" ] &&
         printf 'secrets:   identity.txt\n' >&2
     [ -e "$SECRETS_DIR/recipients.txt" ] &&
+        [ "$SECRETS_DIR/recipients.txt" != "${SECRETS_RECIPIENTS:-}" ] &&
         printf 'secrets:   recipients.txt\n' >&2
-    find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null |
+    _secrets_legacy_blobs |
         while IFS= read -r f; do
             [ -n "$f" ] && printf 'secrets:   %s\n' "${f##*/}" >&2
         done
@@ -565,7 +583,12 @@ _secrets_rekey() (
     # An interrupt rolls nothing back -- it just stops. No entry can be lost,
     # but the store may be left half on the new recipients and half on the
     # old, which matters most to the very workflow rekey exists for.
-    trap 'printf "secrets: interrupted; the store may be partly rekeyed -- re-run: secrets rekey\n" >&2
+    phase=stage
+    trap 'if [ "$phase" = install ]; then
+              printf "secrets: interrupted; the store may be partly rekeyed -- re-run: secrets rekey\n" >&2
+          else
+              printf "secrets: interrupted while staging; nothing changed\n" >&2
+          fi
           exit 1' HUP INT TERM
     stage=$(mktemp -d "$SECRETS_STORE/.rekey.XXXXXX") || exit 1
     idf=$(_secrets_identity_open) || exit 3
@@ -603,6 +626,7 @@ _secrets_rekey() (
     # the staging tree cannot destroy it, and a failure part way through can
     # still put every already-installed entry back. $stage lives inside the
     # store, so the link is always within one filesystem.
+    phase=install
     mkdir -p "$stage/.orig" || exit 1
     done_list="$stage/.done"
     : > "$done_list" || exit 1
@@ -675,7 +699,7 @@ _secrets_migrate() (
     chmod 700 "$SECRETS_STORE" || exit 1
 
     n=0
-    find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' 2>/dev/null > "$list" || exit 1
+    _secrets_legacy_blobs > "$list" || exit 1
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         # A pre-0.2 blob must never overwrite a live entry of the same name:
@@ -692,22 +716,27 @@ _secrets_migrate() (
     done < "$list"
 
     rf=${SECRETS_RECIPIENTS:-$SECRETS_STORE/.age-recipients}
-    if [ -e "$SECRETS_DIR/identity.txt" ] && [ -e "$SECRETS_IDENTITY" ]; then
+    if [ -e "$SECRETS_DIR/identity.txt" ] &&
+       [ "$SECRETS_DIR/identity.txt" != "$SECRETS_IDENTITY" ] &&
+       [ -e "$SECRETS_IDENTITY" ]; then
         printf 'secrets: both %s and %s exist\n' \
             "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" >&2
         printf 'secrets: move or delete the old identity.txt by hand, then run: secrets migrate\n' >&2
         exit 1
     fi
-    if [ -e "$SECRETS_DIR/identity.txt" ]; then
+    if [ -e "$SECRETS_DIR/identity.txt" ] &&
+       [ "$SECRETS_DIR/identity.txt" != "$SECRETS_IDENTITY" ]; then
         mv -- "$SECRETS_DIR/identity.txt" "$SECRETS_IDENTITY" || exit 1
     fi
-    if [ -e "$SECRETS_DIR/recipients.txt" ] && [ -e "$rf" ]; then
+    if [ -e "$SECRETS_DIR/recipients.txt" ] &&
+       [ "$SECRETS_DIR/recipients.txt" != "$rf" ] && [ -e "$rf" ]; then
         printf 'secrets: both %s and %s exist\n' \
             "$SECRETS_DIR/recipients.txt" "$rf" >&2
         printf 'secrets: move or delete the old recipients.txt by hand, then run: secrets migrate\n' >&2
         exit 1
     fi
-    if [ -e "$SECRETS_DIR/recipients.txt" ]; then
+    if [ -e "$SECRETS_DIR/recipients.txt" ] &&
+       [ "$SECRETS_DIR/recipients.txt" != "$rf" ]; then
         mv -- "$SECRETS_DIR/recipients.txt" "$rf" || exit 1
     fi
 
