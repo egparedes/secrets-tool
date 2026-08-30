@@ -832,6 +832,30 @@ check "a symlinked base dir is still scanned" "4" "$?"
 check "and migrates" "0" "$?"
 check "its blob came across" "via-symlink" "$( SECRETS_DIR="$t_sy/link"; secrets dec viasym )"
 
+echo "== a symlinked configured path is still recognised =="
+# _secrets_canon resolves a path's directory but not its final component, so
+# a symlink sitting beside its target reads as two paths -- and find -L lists
+# both. Without an inode comparison migrate files the live private key in the
+# store as an entry, the same consequence as the trailing-slash bug.
+t_sl2="$T/symid"
+mkdir -p "$t_sl2/store"
+t_sl2env() { export SECRETS_DIR="$t_sl2" SECRETS_IDENTITY="$t_sl2/id-link.age"; }
+"$KG" -o "$t_sl2/real-id.age" 2>/dev/null
+ln -s real-id.age "$t_sl2/id-link.age"
+"$KG" -y "$t_sl2/real-id.age" > "$t_sl2/store/.age-recipients"
+"$AGEBIN" -e -R "$t_sl2/store/.age-recipients" -o "$t_sl2/blob.age" <<'EOF'
+blob-value
+EOF
+check "find -L really does list both spellings" "2" \
+    "$(find -L "$t_sl2" -maxdepth 1 -type f -name '*id*.age' | wc -l | tr -d ' ')"
+( t_sl2env; secrets migrate ) >/dev/null 2>&1
+check "migrate rc with a symlinked identity" "0" "$?"
+check "the private key stayed out of the store" "0" \
+    "$(grep -rl 'AGE-SECRET-KEY-' "$t_sl2/store" 2>/dev/null | wc -l | tr -d ' ')"
+check "and is not listed as an entry" "0" \
+    "$( t_sl2env; secrets ls | grep -cx 'real-id' )"
+check "the real blob migrated and decrypts" "blob-value" "$( t_sl2env; secrets dec blob )"
+
 echo "== a base directory that cannot be scanned is refused, not opened =="
 # Masking find's status here recreates exactly the "empty and healthy" store
 # the backstop exists to prevent. Root ignores the permission, so this needs
@@ -854,6 +878,24 @@ EOF
     chmod 755 "$t_ur"
     check "the blob was never stranded" "1" \
         "$([ -f "$t_ur/hidden.age" ] && echo 1 || echo 0)"
+
+    # The guard must fail CLOSED when it cannot scan. This needs a store
+    # whose only legacy artifacts are blobs: with identity.txt or
+    # recipients.txt present those checks fire first and mask the blob scan
+    # entirely, so the fail-open direction would look fine.
+    t_bo="$T/blobonly"
+    mkdir -p "$t_bo"
+    "$AGEBIN" -e -R "$RCP" -o "$t_bo/lone.age" <<'EOF'
+lone
+EOF
+    chmod 333 "$t_bo"
+    ( SECRETS_DIR="$t_bo"; secrets ls ) >/dev/null 2>&1
+    check "an unscannable blob-only store is refused, not reported empty" "4" "$?"
+    ( SECRETS_DIR="$t_bo"; secrets ls ) 2>&1 | grep -q 'cannot list'
+    check "and says why" "0" "$?"
+    chmod 755 "$t_bo"
+    check "its blob is still there" "1" \
+        "$([ -f "$t_bo/lone.age" ] && echo 1 || echo 0)"
     check "and the store opens once it is readable again" "4" \
         "$( SECRETS_DIR="$t_ur"; secrets ls >/dev/null 2>&1; echo $? )"
 else

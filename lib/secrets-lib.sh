@@ -300,12 +300,30 @@ _secrets_canon() (
     esac
 )
 
+# Print $1's inode number, following symlinks. ls -L, -d and -i are all
+# POSIX. Empty when the file cannot be stat'd.
+_secrets_inode() (
+    out=$(ls -Ldi -- "$1" 2>/dev/null) || exit 1
+    [ -n "$out" ] || exit 1
+    out=${out#"${out%%[![:space:]]*}"}          # ls pads the inode column
+    printf '%s\n' "${out%%[![:digit:]]*}"
+)
+
 # True when $1 and $2 name the same file.
 _secrets_same_file() (
     [ -n "${1-}" ] && [ -n "${2-}" ] || exit 1
     a=$(_secrets_canon "$1") || exit 1
     b=$(_secrets_canon "$2") || exit 1
-    [ "$a" = "$b" ]
+    [ "$a" = "$b" ] && exit 0
+    # Two spellings can still be one file: _secrets_canon resolves the
+    # directory but not the final component, so a symlink sitting beside its
+    # target reads as two different paths -- and find -L lists both. Compare
+    # inodes to settle it, but only within one directory: that guarantees one
+    # filesystem, so the inode numbers are actually comparable.
+    [ "${a%/*}" = "${b%/*}" ] || exit 1
+    ia=$(_secrets_inode "$1") || exit 1
+    ib=$(_secrets_inode "$2") || exit 1
+    [ -n "$ia" ] && [ "$ia" = "$ib" ]
 )
 
 # Print the pre-0.2 blobs sitting directly in $SECRETS_DIR. A top-level
@@ -326,11 +344,50 @@ _secrets_legacy_blobs() (
         exit 1
     }
     [ -n "$found" ] || exit 0
+
+    # Resolve the fixed side once. Every blob lives in $SECRETS_DIR, so its
+    # canonical path is that directory's plus its own basename -- no fork per
+    # blob. An inode comparison is only needed when a configured path sits in
+    # this same directory, where it could be a symlink to one of the blobs.
+    base=$(_secrets_canon "$SECRETS_DIR/.") || base=$SECRETS_DIR
+    base=${base%/.}
+    idc=$(_secrets_canon "$SECRETS_IDENTITY") || idc=''
+    rcc=''
+    [ -n "${SECRETS_RECIPIENTS:-}" ] && { rcc=$(_secrets_canon "$SECRETS_RECIPIENTS") || rcc=''; }
+
+    # An inode comparison is only needed when a symlink could alias a blob to
+    # a configured path -- either that path is a symlink, or one of the blobs
+    # is. Both are one-time checks, so the ordinary store never pays a fork
+    # per blob for a case that cannot arise in it.
+    aliasable=''
+    [ -h "$SECRETS_IDENTITY" ] && aliasable=1
+    [ -n "${SECRETS_RECIPIENTS:-}" ] && [ -h "$SECRETS_RECIPIENTS" ] && aliasable=1
+    if [ -z "$aliasable" ] &&
+       [ -n "$(find "$SECRETS_DIR" -maxdepth 1 -type l -name '*.age' 2>/dev/null |
+               head -n 1)" ]; then
+        aliasable=1
+    fi
+    idi=''
+    rci=''
+    if [ -n "$aliasable" ]; then
+        [ "${idc%/*}" = "$base" ] && idi=$(_secrets_inode "$SECRETS_IDENTITY")
+        [ -n "$rcc" ] && [ "${rcc%/*}" = "$base" ] &&
+            rci=$(_secrets_inode "$SECRETS_RECIPIENTS")
+    fi
+
     printf '%s\n' "$found" |
         while IFS= read -r f; do
             [ -n "$f" ] || continue
-            _secrets_same_file "$f" "$SECRETS_IDENTITY" && continue
-            _secrets_same_file "$f" "${SECRETS_RECIPIENTS:-}" && continue
+            fc="$base/${f##*/}"
+            [ "$fc" = "$idc" ] && continue
+            [ -n "$rcc" ] && [ "$fc" = "$rcc" ] && continue
+            if [ -n "$idi" ] || [ -n "$rci" ]; then
+                fi_=$(_secrets_inode "$f") || fi_=''
+                if [ -n "$fi_" ]; then
+                    [ "$fi_" = "$idi" ] && continue
+                    [ -n "$rci" ] && [ "$fi_" = "$rci" ] && continue
+                fi
+            fi
             printf '%s\n' "$f"
         done
     exit 0
