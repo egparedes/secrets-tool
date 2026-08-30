@@ -756,6 +756,22 @@ printf 'tok\n' | ( t_cfgenv; secrets enc one )
 check "the guard ignores a configured identity.txt" "0" "$?"
 check "and the store works" "tok" \
     "$( t_cfgenv; secrets dec one )"
+# The refusal in migrate has to be destination-aware too, not just the guard:
+# with a genuine leftover present migrate does run, reaches that refusal, and
+# without the check would report "both X and X exist" and brick the store.
+# this store pins SECRETS_RECIPIENTS, so its keys are in recipients.txt
+"$AGEBIN" -e -R "$t_cfg/recipients.txt" -o "$t_cfg/leftover.age" <<'EOF'
+leftover-value
+EOF
+( t_cfgenv; secrets ls ) >/dev/null 2>&1
+check "a real leftover still trips the guard" "4" "$?"
+( t_cfgenv; secrets migrate ) >/dev/null 2>&1
+check "migrate completes despite the configured identity.txt" "0" "$?"
+check "the leftover migrated" "leftover-value" "$( t_cfgenv; secrets dec leftover )"
+check "and the configured identity is untouched" "1" \
+    "$(grep -c 'AGE-SECRET-KEY' "$t_cfg/identity.txt")"
+( t_cfgenv; secrets ls ) >/dev/null 2>&1
+check "the store opens afterwards" "0" "$?"
 
 # A top-level *.age that IS the identity must never be filed as an entry:
 # migrate would move the live private key into the store, in plaintext, and
