@@ -262,15 +262,15 @@ SECRETS_AGE=rage dash tests/test-secrets.sh    # pin backend and shell
 make test-interop                              # against real passage/pago
 ```
 
-The main suite (200 checks on a typical machine — two are skipped if a
+The main suite (212 checks on a typical machine — two are skipped if a
 system-wide library is already installed, one if `zsh` isn't present,
 eleven if `make` isn't present, and five if there is no `script`(1) to hand
 age a pty) covers roundtrips, binary payloads, hierarchical names, the
 `.age-recipients` walk, tamper rejection, path-escape attempts, clobber
 protection, write-only operation, atomic rekey, armor mode, encrypted
 identities, migration from a pre-0.2 store, completions, variable-leak
-detection, CLI library discovery, and install staging via `make
-install`/`make uninstall`. CI runs it across {dash, bash, zsh} × {age,
+detection, bash completion driven the way readline drives it, CLI library
+discovery, and install staging via `make install`/`make uninstall`. CI runs it across {dash, bash, zsh} × {age,
 rage}, plus the interop suite against pinned passage and pago releases.
 
 ## Threat model

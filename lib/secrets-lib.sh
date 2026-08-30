@@ -568,23 +568,38 @@ _secrets_completions() (
     case "${1-}" in
     bash) cat <<'EOF'
 _secrets_complete() {
-    local cur="${COMP_WORDS[COMP_CWORD]}" line
+    local cur="${COMP_WORDS[COMP_CWORD]}" pfx='' typed line i
     COMPREPLY=()
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "init enc dec ls rm rename recipients rekey migrate completions help" -- "$cur"))
         return
     fi
     case "${COMP_WORDS[1]}" in
-        dec|rm|recipients|enc|rename)
-            [[ ${COMP_WORDS[1]} == @(enc|rename) && -z $cur ]] && COMPREPLY+=(-f)
-            # Read names one per line: a stored name may contain spaces or
-            # shell metacharacters, and `compgen -W` would expand them.
-            while IFS= read -r line; do
-                [[ $line == "$cur"* ]] && COMPREPLY+=("$line")
-            done < <(secrets ls 2>/dev/null)
-            ;;
-        completions)  COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur")) ;;
+        dec|rm|recipients|enc|rename) ;;
+        completions) COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur")); return ;;
+        *) return ;;
     esac
+
+    # A stored name may hold ':', which bash counts as a word break: the word
+    # the user typed is then spread across several COMP_WORDS and only the
+    # last one gets replaced. Rejoin the earlier pieces to match against, and
+    # trim them back off each candidate so the line does not gain a second
+    # copy of what is already on it.
+    for (( i = 2; i < COMP_CWORD; i++ )); do
+        [[ ${COMP_WORDS[i]} == -f ]] && continue
+        pfx+="${COMP_WORDS[i]}"
+    done
+    # An escaped space reaches us as a backslash the stored name lacks.
+    typed="$pfx${cur//\\/}"
+
+    [[ ${COMP_WORDS[1]} == @(enc|rename) && -z $typed ]] && COMPREPLY+=(-f)
+    # One name per line: names may contain spaces and shell metacharacters,
+    # so `compgen -W` would word-split and expand them. Quote what goes back,
+    # or bash inserts `with space` as two arguments.
+    while IFS= read -r line; do
+        [[ $line == "$typed"* ]] || continue
+        COMPREPLY+=("$(printf '%q' "${line#"$pfx"}")")
+    done < <(secrets ls 2>/dev/null)
 }
 complete -F _secrets_complete secrets
 EOF

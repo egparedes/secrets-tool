@@ -350,6 +350,52 @@ grep -qw migrate "$T/c.fish"; check "fish completes migrate" "0" "$?"
 grep -q 'compgen -W "$(secrets ls' "$T/c.bash"
 check "bash completion does not expand stored names" "1" "$?"
 
+echo "== bash completion, driven the way bash drives it =="
+# Names may now hold '/', ':' and spaces. Build COMP_WORDS the way readline
+# would -- bash breaks words at ':' -- and check what the function replies.
+cat > "$T/probe.bash" <<'PROBE'
+source "$CB"
+COMP_WORDS=("$@"); COMP_CWORD=$(( $# - 1 )); COMPREPLY=()
+_secrets_complete
+printf '%s\n' "${COMPREPLY[*]}"
+PROBE
+# The completion shells out to `secrets ls`, but this suite drives a sourced
+# shell function -- so the probe needs the real CLI on its PATH.
+t_probe() {
+    CB="$T/c.bash" PATH="$(cd "$(dirname "$0")/../bin" && pwd):$PATH" \
+        bash "$T/probe.bash" "$@"
+}
+
+for t_n in 'zz/nested-one' 'zz/nested-two' 'zz:colon' 'zz space'; do
+    printf 'v\n' | secrets enc "$t_n"
+done
+check "completes a nested prefix" "zz/nested-one zz/nested-two" \
+    "$(t_probe secrets dec 'zz/n')"
+check "completes a nested name uniquely" "zz/nested-one" \
+    "$(t_probe secrets dec 'zz/nested-o')"
+check "completes past a deeper slash" "zz/nested-one zz/nested-two" \
+    "$(t_probe secrets dec 'zz/')"
+# ':' is in COMP_WORDBREAKS, so bash hands the word over in pieces and
+# replaces only the last: the reply must be trimmed of what is already typed,
+# or the line ends up reading 'zz:zz:colon'.
+check "trims the colon-broken prefix" "colon" "$(t_probe secrets dec 'zz' ':' 'c')"
+check "trims a bare colon-broken prefix" "colon" "$(t_probe secrets dec 'zz' ':' '')"
+# a name with a space must come back quoted, or bash inserts two arguments
+check "quotes a name containing a space" 'zz\ space' "$(t_probe secrets dec 'zz sp')"
+check "matches through an escaped space" 'zz\ space' "$(t_probe secrets dec 'zz\ sp')"
+# -f is offered only with no name typed, and never joins the colon prefix
+check "offers -f for enc with nothing typed" "1" \
+    "$(t_probe secrets enc '' | grep -cw -- '-f')"
+check "no -f once a name is being typed" "0" \
+    "$(t_probe secrets enc 'zz/n' | grep -cw -- '-f')"
+check "-f does not corrupt the colon prefix" "colon" \
+    "$(t_probe secrets enc -f 'zz' ':' 'c')"
+check "completes names after -f" "zz/nested-one zz/nested-two" \
+    "$(t_probe secrets enc -f 'zz/n')"
+for t_n in 'zz/nested-one' 'zz/nested-two' 'zz:colon' 'zz space'; do
+    yes | secrets rm "$t_n" >/dev/null 2>&1
+done
+
 echo "== cli wrapper =="
 CLI=$(dirname "$0")/../bin/secrets
 # `env VAR= cmd` below is needed only for empty-value overrides -- the bare

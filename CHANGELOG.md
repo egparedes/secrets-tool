@@ -36,7 +36,11 @@ guarantees — the layout and the naming rules changed underneath them.
   that actually govern it; with no `.age-recipients` anywhere it derives the
   public keys from the identity, which is what encryption would use.
 - The bash completion no longer expands stored names through `compgen -W`,
-  now that names may contain metacharacters.
+  now that names may contain metacharacters. It also rejoins the pieces bash
+  splits a name into at `:` (a `COMP_WORDBREAKS` character) and trims them
+  back off its replies, and quotes what it returns, so names holding colons
+  or spaces complete correctly rather than producing `zz:zz:colon` or two
+  arguments. zsh and fish already handled both.
 
 ### Added
 
