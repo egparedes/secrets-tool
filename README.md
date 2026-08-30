@@ -291,7 +291,7 @@ make test-interop                              # against real passage/pago
 `make test-interop` exits non-zero if neither passage nor pago is on your
 `PATH` — a run that verified nothing is not a pass.
 
-The main suite is 344 checks as an ordinary user, 331 as root. Blocks skip
+The main suite is 348 checks as an ordinary user, 335 as root. Blocks skip
 themselves when they cannot run: thirteen need a non-root user (they turn on
 permissions root ignores), eighteen need `script`(1) to hand a command a
 pty, eleven need `make`, two need no system-wide library installed, and one

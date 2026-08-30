@@ -108,6 +108,7 @@ if command -v pago >/dev/null 2>&1 && command -v pago-agent >/dev/null 2>&1 &&
     exec 9<"$T/pw"
     printf 'pago-written\n' | PAGO_PASSPHRASE_FD=9 pago add -m work/db >/dev/null 2>&1
     check "secrets ls sees the pago entry" "1" "$("$CLI" ls | grep -cx 'work/db')"
+    : > "$T/idmark"
     i_out=$(printf 'hunter2\n' | script -qec \
         "env SECRETS_DIR=$G $CLI dec work/db" /dev/null 2>/dev/null)
     printf '%s' "$i_out" | grep -q 'pago-written'
@@ -124,7 +125,7 @@ if command -v pago >/dev/null 2>&1 && command -v pago-agent >/dev/null 2>&1 &&
     # anything else on the machine, so only non-empty ones count.
     check "no decrypted identity left behind" "0" \
         "$(find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' \
-            -size +0c 2>/dev/null | wc -l | tr -d ' ')"
+            -newer "$T/idmark" -size +0c 2>/dev/null | wc -l | tr -d ' ')"
 
     pago agent stop >/dev/null 2>&1
     unset PAGO_DIR PAGO_GIT PAGO_MEMLOCK PAGO_SOCK

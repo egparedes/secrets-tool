@@ -33,17 +33,22 @@ SECRETS_LIB=${SECRETS_LIB:-$(dirname "$0")/../lib/secrets-lib.sh}
 # Unwrapped identities land in a shared directory (/dev/shm or $TMPDIR), so
 # asserting a global count of zero makes these checks hostage to anything
 # else on the machine. Compare against the count taken just before instead.
-t_idtmp() {
+# Unwrapped identities land in a shared directory (/dev/shm or $TMPDIR), so
+# a bare count there is hostage to anything else on the machine -- including
+# another copy of this suite, whose in-flight identity file is legitimately
+# non-empty and would read as one we stranded. Scope every check to files
+# created after a marker taken just before the command under test. (This
+# still assumes the suite is not run concurrently with itself; CI runs one
+# job at a time.)
+#
+# What must never survive is a file holding key material. An interrupt can
+# strand an *empty* one: mktemp creates the file inside a command
+# substitution, before the shell can record its name to trap on, and POSIX
+# sh cannot close that window -- so -size +0c is the property asserted.
+t_idmark() { : > "$T/idmark.$1"; }
+t_idnew() {
     find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' \
-        2>/dev/null | wc -l | tr -d ' '
-}
-# An interrupt can strand an *empty* temp: mktemp creates the file inside a
-# command substitution, before the shell can record its name to trap on, and
-# POSIX sh has no way to close that. What must never survive is a file with
-# key material in it, so that is what the interrupt checks assert.
-t_idtmp_nonempty() {
-    find /dev/shm "${TMPDIR:-/tmp}" -maxdepth 1 -name '.secrets-id.*' \
-        -size +0c 2>/dev/null | wc -l | tr -d ' '
+        -newer "$T/idmark.$1" -size +0c 2>/dev/null | wc -l | tr -d ' '
 }
 
 printf 'backend: %s\n' "$(_secrets_age)"
@@ -160,12 +165,12 @@ check "rekey covers nested entries" "AKIA-nested" \
 check "no stage dirs left" "0" "$(find "$SECRETS_DIR" -name '.rekey.*' | wc -l)"
 
 echo "== rekey is all-or-nothing =="
-t_id0=$(t_idtmp)
+t_idmark abort
 printf 'corrupt-me\n' > "$STORE/broken.age"
 secrets rekey >/dev/null 2>&1; check "rekey aborts on bad blob" "1" "$?"
 check "github untouched after abort" "$t_before" "$(secrets dec github)"
 check "no stage dir after abort" "0" "$(find "$SECRETS_DIR" -name '.rekey.*' | wc -l)"
-check "no identity temporaries after abort" "$t_id0" "$(t_idtmp)"
+check "no identity temporaries after abort" "0" "$(t_idnew abort)"
 rm -f "$STORE/broken.age"
 
 echo "== rekey's install pass rolls back =="
@@ -643,7 +648,7 @@ if command -v script >/dev/null 2>&1 &&
    printf 'pw\npw\n' | script -qec \
        "$AGEBIN -a -e -p -o $T/id.enc $T/id2.txt" /dev/null >/dev/null 2>&1 &&
    [ -s "$T/id.enc" ]; then
-    t_idbase=$(t_idtmp)
+    t_idmark pago
     G="$T/pago"
     mkdir -p "$G/store"
     cp "$T/id.enc" "$G/identities"
@@ -656,7 +661,7 @@ if command -v script >/dev/null 2>&1 &&
         "env SECRETS_DIR=$G $(dirname "$0")/../bin/secrets dec svc" /dev/null 2>/dev/null)
     printf '%s' "$t_out" | grep -q 'pago-secret'
     check "dec decrypts the encrypted identities file" "0" "$?"
-    check "no decrypted identity left behind" "$t_idbase" "$(t_idtmp)"
+    check "no decrypted identity left behind" "0" "$(t_idnew pago)"
     # Interrupting at the passphrase prompt must not strand the unwrapped
     # identity: the file exists during that whole wait, and the caller's trap
     # cannot cover it ($idf is still empty until the substitution returns).
@@ -665,10 +670,11 @@ if command -v script >/dev/null 2>&1 &&
     cp "$T/id.enc" "$G2/identities"
     "$KG" -y "$T/id2.txt" > "$G2/store/.age-recipients"
     printf 'v\n' | ( SECRETS_DIR="$G2"; secrets enc svc2 )
+    t_idmark intr
     { sleep 3; printf '\003'; sleep 2; } | script -qec \
         "env SECRETS_DIR=$G2 $BINDIR/secrets dec svc2" /dev/null >/dev/null 2>&1
     check "an interrupt at the passphrase prompt strands no key material" "0" \
-        "$(t_idtmp_nonempty)"
+        "$(t_idnew intr)"
 else
     echo "  skip pago encrypted-identities checks (no script(1) pty available)"
 fi
@@ -831,6 +837,24 @@ check "a symlinked base dir is still scanned" "4" "$?"
 ( SECRETS_DIR="$t_sy/link"; secrets migrate ) >/dev/null 2>&1
 check "and migrates" "0" "$?"
 check "its blob came across" "via-symlink" "$( SECRETS_DIR="$t_sy/link"; secrets dec viasym )"
+
+echo "== identity.txt symlinked to the real identity is not a leftover =="
+# _secrets_same_file's inode fallback is what recognises this: the two paths
+# canonicalise differently (the symlink's own name is the final component),
+# so without it the guard calls identity.txt a pre-0.2 leftover and migrate
+# refuses with "both X and Y exist" -- bricking a perfectly good store.
+t_st="$T/symtxt"
+( SECRETS_DIR="$t_st"; secrets init ) >/dev/null 2>&1
+printf 'sv\n' | ( SECRETS_DIR="$t_st"; secrets enc one )
+ln -s identities "$t_st/identity.txt"
+check "the two paths really do canonicalise differently" "1" \
+    "$( a=$(_secrets_canon "$t_st/identity.txt"); b=$(_secrets_canon "$t_st/identities")
+        [ "$a" = "$b" ] && echo 0 || echo 1 )"
+( SECRETS_DIR="$t_st"; secrets ls ) >/dev/null 2>&1
+check "a symlinked identity.txt does not trip the guard" "0" "$?"
+check "and the store still works" "sv" "$( SECRETS_DIR="$t_st"; secrets dec one )"
+( SECRETS_DIR="$t_st"; secrets migrate ) >/dev/null 2>&1
+check "migrate says there is nothing to do" "1" "$?"
 
 echo "== a symlinked configured path is still recognised =="
 # _secrets_canon resolves a path's directory but not its final component, so
