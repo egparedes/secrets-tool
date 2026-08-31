@@ -309,11 +309,18 @@ _secrets_inode() (
     printf '%s\n' "${out%%[![:digit:]]*}"
 )
 
-# Print the filesystem $1 lives on. df -P is POSIX and its last line starts
-# with the device. Empty when it cannot be determined.
+# Print an identifier for the filesystem $1 lives on: df -P is POSIX, and
+# its last line is "source blocks used avail capacity mountpoint". The source
+# alone is not enough -- every tmpfs reports "tmpfs" -- so the mount point,
+# which is what actually distinguishes two mounts, is included. Empty when it
+# cannot be determined.
 _secrets_device() (
     out=$(df -P -- "$1" 2>/dev/null) || exit 1
-    printf '%s\n' "$out" | tail -n 1 | { read -r dev _rest; printf '%s\n' "$dev"; }
+    printf '%s\n' "$out" | tail -n 1 | {
+        read -r dev _blocks _used _avail _cap mnt
+        [ -n "$dev$mnt" ] || exit 1
+        printf '%s on %s\n' "$dev" "$mnt"
+    }
 )
 
 # True when $1 and $2 name the same file.

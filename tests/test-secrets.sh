@@ -945,6 +945,36 @@ check "(c) no key in the store" "0" \
 check "(c) the key is not listed as an entry" "0" "$( t_a3env; secrets ls | grep -cx backup )"
 check "(c) the real blob migrated" "keep-three" "$( t_a3env; secrets dec keep3 )"
 
+echo "== an inode number alone is not proof of identity =="
+# Inode numbers are unique only within a filesystem: two fresh tmpfs both
+# hand out inode 2. Without a device comparison a genuine secret matches the
+# identity by accident and is silently skipped, leaving the store reporting
+# empty. Needs mount privileges, so it only runs where those exist.
+t_mnt="$T/mounts"
+mkdir -p "$t_mnt/one" "$t_mnt/two"
+if mount -t tmpfs -o size=1m tmpfs "$t_mnt/one" 2>/dev/null &&
+   mount -t tmpfs -o size=1m tmpfs "$t_mnt/two" 2>/dev/null; then
+    : > "$t_mnt/one/blob.age"
+    : > "$t_mnt/two/identities"
+    check "the two inodes really do collide" "0" \
+        "$( a=$(_secrets_inode "$t_mnt/one/blob.age")
+            b=$(_secrets_inode "$t_mnt/two/identities")
+            [ "$a" = "$b" ] && echo 0 || echo 1 )"
+    check "and df's source name alone does not separate them" "0" \
+        "$( a=$(df -P -- "$t_mnt/one/blob.age" | tail -n 1 | cut -d' ' -f1)
+            b=$(df -P -- "$t_mnt/two/identities" | tail -n 1 | cut -d' ' -f1)
+            [ "$a" = "$b" ] && echo 0 || echo 1 )"
+    _secrets_same_file "$t_mnt/one/blob.age" "$t_mnt/two/identities"
+    check "colliding inodes on different filesystems are not one file" "1" "$?"
+    ln "$t_mnt/one/blob.age" "$t_mnt/one/hard.age"
+    _secrets_same_file "$t_mnt/one/blob.age" "$t_mnt/one/hard.age"
+    check "but a hard link on one filesystem still is" "0" "$?"
+    umount "$t_mnt/one" 2>/dev/null
+    umount "$t_mnt/two" 2>/dev/null
+else
+    echo "  skip colliding-inode checks (mount not permitted)"
+fi
+
 echo "== canonicalisation resolves a symlinked directory =="
 # _secrets_canon's `cd -P` is what makes a path reached through a symlinked
 # directory compare equal to the same file reached directly.
