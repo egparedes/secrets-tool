@@ -880,6 +880,93 @@ check "and is not listed as an entry" "0" \
     "$( t_sl2env; secrets ls | grep -cx 'real-id' )"
 check "the real blob migrated and decrypts" "blob-value" "$( t_sl2env; secrets dec blob )"
 
+echo "== every way a blob can alias the identity is recognised =="
+# The inode comparison is gated on a cheap check for whether aliasing is even
+# possible, so each branch of that gate needs its own case: a test that
+# happens to satisfy two of them proves nothing about either.
+
+# (a) the configured path is itself a symlink, and no blob is one
+t_a1="$T/alias-idsym"
+mkdir -p "$t_a1/store"
+t_a1env() { export SECRETS_DIR="$t_a1" SECRETS_IDENTITY="$t_a1/idlink"; }
+"$KG" -o "$t_a1/real-id.age" 2>/dev/null
+ln -s real-id.age "$t_a1/idlink"
+"$KG" -y "$t_a1/real-id.age" > "$t_a1/store/.age-recipients"
+"$AGEBIN" -e -R "$t_a1/store/.age-recipients" -o "$t_a1/keep1.age" <<'EOF'
+keep-one
+EOF
+check "(a) no blob is a symlink" "0" \
+    "$(find "$t_a1" -maxdepth 1 -type l -name '*.age' | wc -l | tr -d ' ')"
+( t_a1env; secrets migrate ) >/dev/null 2>&1
+check "(a) migrate rc" "0" "$?"
+check "(a) no key in the store" "0" \
+    "$(grep -rl 'AGE-SECRET-KEY-' "$t_a1/store" 2>/dev/null | wc -l | tr -d ' ')"
+check "(a) the real blob migrated" "keep-one" "$( t_a1env; secrets dec keep1 )"
+
+# (b) the configured path is a plain file, and a blob is an absolute symlink
+#     to it -- only the blob scan can see this one
+t_a2="$T/alias-blobsym"
+mkdir -p "$t_a2/store"
+t_a2env() { export SECRETS_DIR="$t_a2" SECRETS_IDENTITY="$t_a2/identities"; }
+"$KG" -o "$t_a2/identities" 2>/dev/null
+"$KG" -y "$t_a2/identities" > "$t_a2/store/.age-recipients"
+ln -s "$t_a2/identities" "$t_a2/alias.age"
+"$AGEBIN" -e -R "$t_a2/store/.age-recipients" -o "$t_a2/keep2.age" <<'EOF'
+keep-two
+EOF
+check "(b) the configured path is not a symlink" "0" \
+    "$([ -h "$t_a2/identities" ] && echo 1 || echo 0)"
+( t_a2env; secrets migrate ) >/dev/null 2>&1
+check "(b) migrate rc" "0" "$?"
+check "(b) no key in the store" "0" \
+    "$(grep -rl 'AGE-SECRET-KEY-' "$t_a2/store" 2>/dev/null | wc -l | tr -d ' ')"
+check "(b) the key is not listed as an entry" "0" "$( t_a2env; secrets ls | grep -cx alias )"
+check "(b) the real blob migrated" "keep-two" "$( t_a2env; secrets dec keep2 )"
+
+# (c) a hard link, with no symlink anywhere -- `ln`, cp -l, rsync
+#     --link-dest, a dedup pass
+t_a3="$T/alias-hardlink"
+mkdir -p "$t_a3/store"
+t_a3env() { export SECRETS_DIR="$t_a3" SECRETS_IDENTITY="$t_a3/identities.age"; }
+"$KG" -o "$t_a3/identities.age" 2>/dev/null
+"$KG" -y "$t_a3/identities.age" > "$t_a3/store/.age-recipients"
+ln "$t_a3/identities.age" "$t_a3/backup.age"
+"$AGEBIN" -e -R "$t_a3/store/.age-recipients" -o "$t_a3/keep3.age" <<'EOF'
+keep-three
+EOF
+check "(c) there is no symlink to find" "0" \
+    "$(find "$t_a3" -maxdepth 1 -type l -name '*.age' | wc -l | tr -d ' ')"
+check "(c) but the link count betrays it" "2" \
+    "$(find "$t_a3" -maxdepth 1 -type f -name '*.age' -links +1 | wc -l | tr -d ' ')"
+( t_a3env; secrets migrate ) >/dev/null 2>&1
+check "(c) migrate rc" "0" "$?"
+check "(c) no key in the store" "0" \
+    "$(grep -rl 'AGE-SECRET-KEY-' "$t_a3/store" 2>/dev/null | wc -l | tr -d ' ')"
+check "(c) the key is not listed as an entry" "0" "$( t_a3env; secrets ls | grep -cx backup )"
+check "(c) the real blob migrated" "keep-three" "$( t_a3env; secrets dec keep3 )"
+
+echo "== canonicalisation resolves a symlinked directory =="
+# _secrets_canon's `cd -P` is what makes a path reached through a symlinked
+# directory compare equal to the same file reached directly.
+t_cd="$T/canondir"
+mkdir -p "$t_cd/real/store"
+ln -s "$t_cd/real" "$t_cd/link"
+t_cdenv() { export SECRETS_DIR="$t_cd/link" SECRETS_IDENTITY="$t_cd/real/identities.age"; }
+"$KG" -o "$t_cd/real/identities.age" 2>/dev/null
+"$KG" -y "$t_cd/real/identities.age" > "$t_cd/real/store/.age-recipients"
+"$AGEBIN" -e -R "$t_cd/real/store/.age-recipients" -o "$t_cd/real/keep4.age" <<'EOF'
+keep-four
+EOF
+check "two spellings of one file canonicalise the same" "0" \
+    "$( a=$(_secrets_canon "$t_cd/link/identities.age")
+        b=$(_secrets_canon "$t_cd/real/identities.age")
+        [ "$a" = "$b" ] && echo 0 || echo 1 )"
+( t_cdenv; secrets migrate ) >/dev/null 2>&1
+check "migrate through the symlinked directory" "0" "$?"
+check "no key in the store" "0" \
+    "$(grep -rl 'AGE-SECRET-KEY-' "$t_cd/real/store" 2>/dev/null | wc -l | tr -d ' ')"
+check "the real blob migrated" "keep-four" "$( t_cdenv; secrets dec keep4 )"
+
 echo "== a base directory that cannot be scanned is refused, not opened =="
 # Masking find's status here recreates exactly the "empty and healthy" store
 # the backstop exists to prevent. Root ignores the permission, so this needs

@@ -309,6 +309,13 @@ _secrets_inode() (
     printf '%s\n' "${out%%[![:digit:]]*}"
 )
 
+# Print the filesystem $1 lives on. df -P is POSIX and its last line starts
+# with the device. Empty when it cannot be determined.
+_secrets_device() (
+    out=$(df -P -- "$1" 2>/dev/null) || exit 1
+    printf '%s\n' "$out" | tail -n 1 | { read -r dev _rest; printf '%s\n' "$dev"; }
+)
+
 # True when $1 and $2 name the same file.
 _secrets_same_file() (
     [ -n "${1-}" ] && [ -n "${2-}" ] || exit 1
@@ -316,14 +323,18 @@ _secrets_same_file() (
     b=$(_secrets_canon "$2") || exit 1
     [ "$a" = "$b" ] && exit 0
     # Two spellings can still be one file: _secrets_canon resolves the
-    # directory but not the final component, so a symlink sitting beside its
-    # target reads as two different paths -- and find -L lists both. Compare
-    # inodes to settle it, but only within one directory: that guarantees one
-    # filesystem, so the inode numbers are actually comparable.
-    [ "${a%/*}" = "${b%/*}" ] || exit 1
+    # directory but not the final component, so a symlink or a hard link
+    # sitting beside its target reads as two different paths -- and find -L
+    # lists both. An inode settles it, but an inode number is only unique
+    # within one filesystem (two fresh tmpfs both hand out inode 2), so the
+    # device has to match as well. Sharing a directory is not proof of that:
+    # a per-file bind mount breaks it.
     ia=$(_secrets_inode "$1") || exit 1
     ib=$(_secrets_inode "$2") || exit 1
-    [ -n "$ia" ] && [ "$ia" = "$ib" ]
+    [ -n "$ia" ] && [ "$ia" = "$ib" ] || exit 1
+    da=$(_secrets_device "$1") || exit 1
+    db=$(_secrets_device "$2") || exit 1
+    [ -n "$da" ] && [ "$da" = "$db" ]
 )
 
 # Print the pre-0.2 blobs sitting directly in $SECRETS_DIR. A top-level
@@ -367,6 +378,15 @@ _secrets_legacy_blobs() (
                head -n 1)" ]; then
         aliasable=1
     fi
+    # A hard link aliases without a symlink existing anywhere, so a scan for
+    # symlinks alone misses it -- `ln` for a backup, cp -l, rsync
+    # --link-dest, or a dedup pass. -links is POSIX, and an ordinary store
+    # has nothing with a link count above one, so this stays O(1) there.
+    if [ -z "$aliasable" ] &&
+       [ -n "$(find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.age' -links +1 \
+               2>/dev/null | head -n 1)" ]; then
+        aliasable=1
+    fi
     idi=''
     rci=''
     if [ -n "$aliasable" ]; then
@@ -382,6 +402,9 @@ _secrets_legacy_blobs() (
             [ "$fc" = "$idc" ] && continue
             [ -n "$rcc" ] && [ "$fc" = "$rcc" ] && continue
             if [ -n "$idi" ] || [ -n "$rci" ]; then
+                # every blob is in $SECRETS_DIR, and idi/rci were only taken
+                # for configured paths whose directory canonicalises to it,
+                # so one device is already established here
                 fi_=$(_secrets_inode "$f") || fi_=''
                 if [ -n "$fi_" ]; then
                     [ "$fi_" = "$idi" ] && continue
